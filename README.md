@@ -202,6 +202,54 @@ When the shutdown timeout expires, the daemon closes the remaining sessions.
 Their go commands then fail with "GOCACHEPROG exited pre-Close", so set
 `--shutdown-timeout` longer than the longest test run if that matters.
 
+### Why files and not SQLite
+
+The go command reads objects from the paths the daemon returns, so objects
+are files in any case. A database would hold only the index, which makes two
+sources of truth: `go clean -cache` deletes files but not rows, and a crash
+between a rename and a commit leaves a file without a row or a row without a
+file. Repairing that needs the same directory scan the daemon does now. With
+the index in files, each entry is one atomic rename, and the directory is
+always consistent with itself. Only the daemon writes, so SQLite's
+multi-process locking would not be used, and in Go SQLite means either cgo
+or a much larger pure-Go build.
+
+The price is startup time: the daemon reads every index entry when it
+starts.
+
+### Startup cost
+
+`TestOpenScale` in `internal/cache` generates a synthetic cache and measures
+`Open`:
+
+```sh
+GOCACHELRU_SCALE=300000 go test -run TestOpenScale -v ./internal/cache
+```
+
+Measured on 2026-10-27, Apple Silicon Mac (12 cores, APFS), Go 1.27.0.
+300,000 index entries over 150,000 objects, 450,000 files in total. This is
+roughly a full 30 GiB cache: the first real statistics showed 177.9 MiB in
+875 objects (about 200 KiB each) and two index entries per object.
+
+| | Result |
+|---|---|
+| `Open`, warm page cache | 6.6–15.4 s over 6 runs |
+| Memory for the index | about 150 MiB of heap |
+| Where the time goes (`-cpuprofile`) | 97% in system calls; 84% in reading index entries (open, read, close, stat per file) |
+
+A cold page cache, right after boot, was not measured (`purge` needs root)
+and will be slower.
+
+The spread follows the load on the machine: the scan is bound by file system
+calls, not CPU. The daemon opens the cache before it listens, so after a
+`stop` or a reboot the first go command waits for the scan. Later go
+commands, and every build while the daemon runs, do not.
+
+If the wait becomes a problem, the fix is a snapshot of the index written on
+graceful shutdown and read on start, with the full scan only after a crash.
+That is one file read instead of 300,000, and the files stay the source of
+truth.
+
 ## Other implementations
 
 Checked in October 2026; none of them bounds the local cache.
