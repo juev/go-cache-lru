@@ -23,6 +23,9 @@ jobs:
           go-version: stable
           cache: true
 
+      - name: vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: test
         run: go test -race ./...
         env:
