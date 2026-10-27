@@ -1,5 +1,11 @@
 # go-cache-lru
 
+[![Release](https://img.shields.io/github/v/release/juev/go-cache-lru)](https://github.com/juev/go-cache-lru/releases)
+[![CI](https://github.com/juev/go-cache-lru/actions/workflows/ci.yml/badge.svg)](https://github.com/juev/go-cache-lru/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/juev/go-cache-lru)](https://goreportcard.com/report/github.com/juev/go-cache-lru)
+[![Go version](https://img.shields.io/github/go-mod/go-version/juev/go-cache-lru)](go.mod)
+[![License](https://img.shields.io/github/license/juev/go-cache-lru)](LICENSE)
+
 A [GOCACHEPROG](https://pkg.go.dev/cmd/go/internal/cacheprog) implementation
 that keeps the Go build cache under a fixed size.
 
@@ -12,6 +18,17 @@ it does not bound the size.
 go-cache-lru runs one daemon per cache directory. Every go command talks to
 it, and it evicts least recently used entries once the cache grows past the
 limit.
+
+## Quick start
+
+```sh
+go install github.com/juev/go-cache-lru/cmd/go-cache-lru@latest
+export GOCACHEPROG="$(go env GOPATH)/bin/go-cache-lru --dir=$HOME/.cache/go-lru --max-size=30GiB --target-size=25GiB"
+go build ./...                                  # starts the daemon on first use
+go-cache-lru --dir=$HOME/.cache/go-lru stats    # hits, misses, size, evictions
+```
+
+See [Use](#use) for fish, prebuilt binaries and all flags.
 
 ## Features
 
