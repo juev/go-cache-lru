@@ -71,6 +71,7 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 	if err != nil {
 		return err
 	}
+	defer func() { _ = c.Close() }() // for early returns; Close is idempotent
 	snap := c.Snapshot()
 	logf("opened %s in %v: %d entries, %s (limit %s, target %s)", cfg.Dir, time.Since(start).Round(time.Millisecond),
 		snap.Entries, config.FormatSize(snap.Size), config.FormatSize(cfg.MaxSize), config.FormatSize(cfg.TargetSize))
@@ -112,6 +113,9 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 		go c.Trim()
 	}
 	err = srv.Serve(ctx, ln)
+	if cerr := c.Close(); cerr != nil {
+		logf("close index: %v", cerr)
+	}
 	logf("stopped")
 	return err
 }

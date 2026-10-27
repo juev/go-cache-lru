@@ -4,17 +4,18 @@
 //
 // Layout inside the cache directory (normally GOCACHE):
 //
-//	xx/<action>-pa   index entry: output ID, size and put time;
-//	                 its mtime is the last access time (LRU key)
-//	xx/<output>-pd   object body, shared by all actions with this output
-//	ff/.gocacheprog  sentinel that disappears on "go clean -cache"
-//	                 (kept in GOCACHE when the cache lives elsewhere)
-//	gocacheprog/     daemon state: temp files, stats, lock, socket
+//	xx/<output>-pd         object body, shared by all actions with this output
+//	ff/.gocacheprog        sentinel that disappears on "go clean -cache"
+//	                       (kept in GOCACHE when the cache lives elsewhere)
+//	gocacheprog/index.db   SQLite index: action -> output, size, put and
+//	                       access times
+//	gocacheprog/           other daemon state: temp files, stats, lock, socket
 //
 // The two-hex-digit directories are what "go clean -cache" removes, so with
 // the cache in GOCACHE a clean wipes our objects too; with a separate
-// directory the daemon empties it when the sentinel in GOCACHE disappears. The suffixes differ from the go command's
-// own "-a"/"-d" files, so its trimming never touches our files.
+// directory the daemon empties it when the sentinel in GOCACHE disappears.
+// The suffix differs from the go command's own "-a"/"-d" files, so its
+// trimming never touches our files.
 package cache
 
 import (
@@ -31,6 +32,8 @@ import (
 )
 
 const (
+	// metaSuffix marks index entries of the file-based index used before
+	// SQLite; they are imported on start.
 	metaSuffix = "-pa"
 	blobSuffix = "-pd"
 
@@ -43,9 +46,9 @@ const (
 	// blockSize approximates file system allocation for size accounting.
 	blockSize = 4096
 
-	// touchInterval limits how often an access rewrites the index entry's
-	// mtime. The in-memory LRU order is always exact; the mtime only matters
-	// for ordering after a restart.
+	// touchInterval limits how often an access is written to the index.
+	// The in-memory LRU order is always exact; the stored access time only
+	// matters for ordering after a restart.
 	touchInterval = time.Minute
 )
 
@@ -83,7 +86,7 @@ type entry struct {
 	blob     *blob
 	putTime  time.Time
 	atime    time.Time
-	touched  time.Time // last mtime written to disk
+	touched  time.Time // last access time written to the index
 	lruEntry *list.Element
 }
 
@@ -110,6 +113,7 @@ type Cache struct {
 	lru     *list.List // *entry, most recently used first
 	size    int64
 
+	idx     *index
 	evictCh chan struct{}
 	stats   *Counters
 }
@@ -152,12 +156,22 @@ func Open(opts Options) (*Cache, error) {
 	}
 	c.removeStaleTemps()
 	c.stats = loadCounters(c.statsPath())
+	if c.idx, err = openIndex(filepath.Join(c.stateDir, "index.db"), c.logf); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.loadLocked(); err != nil {
+		_ = c.idx.close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// Close writes pending index changes and closes the index. The cache must
+// not be used afterwards.
+func (c *Cache) Close() error {
+	return c.idx.close()
 }
 
 // Dir returns the cache directory.
@@ -170,10 +184,6 @@ func (c *Cache) StateDir() string { return c.stateDir }
 func (c *Cache) Counters() *Counters { return c.stats }
 
 func (c *Cache) statsPath() string { return filepath.Join(c.stateDir, "stats.json") }
-
-func (c *Cache) metaPath(action string) string {
-	return filepath.Join(c.dir, action[:2], action+metaSuffix)
-}
 
 func (c *Cache) blobPath(output string) string {
 	return filepath.Join(c.dir, output[:2], output+blobSuffix)
@@ -284,7 +294,7 @@ func (c *Cache) Get(l *Lease, actionID []byte) (Entry, bool, error) {
 		return Entry{}, false, nil
 	}
 	if touch {
-		_ = os.Chtimes(c.metaPath(action), now, now) // best effort, LRU order after restart
+		c.idx.touch(action, now)
 	}
 	res.OutputID, _ = hex.DecodeString(output)
 	c.stats.Hits.Add(1)
@@ -375,15 +385,12 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 		c.size += usage(size)
 		l.pinLocked(b)
 	}
-	if err := c.writeMetaLocked(action, output, size, now); err != nil {
-		return Entry{}, err
-	}
+	c.idx.upsert(action, output, size, now)
 	e := c.entries[action]
 	if e == nil {
 		e = &entry{action: action}
 		e.lruEntry = c.lru.PushFront(e)
 		c.entries[action] = e
-		c.size += blockSize
 	} else {
 		c.lru.MoveToFront(e.lruEntry)
 	}
@@ -438,28 +445,6 @@ func (c *Cache) writeTemp(outputID []byte, size int64, body io.Reader) (string, 
 	return f.Name(), nil
 }
 
-func (c *Cache) writeMetaLocked(action, output string, size int64, put time.Time) error {
-	data := fmt.Sprintf("v1 %s %d %d\n", output, size, put.UnixNano())
-	f, err := os.CreateTemp(c.tmpDir, "meta-")
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteString(data)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Chmod(f.Name(), 0o644)
-	}
-	if err == nil {
-		err = renameMkdir(f.Name(), c.metaPath(action))
-	}
-	if err != nil {
-		_ = os.Remove(f.Name())
-	}
-	return err
-}
-
 // renameMkdir renames old to new, recreating new's directory if a
 // concurrent "go clean -cache" removed it.
 func renameMkdir(oldPath, newPath string) error {
@@ -474,10 +459,9 @@ func renameMkdir(oldPath, newPath string) error {
 }
 
 func (c *Cache) removeEntryLocked(e *entry) {
-	_ = os.Remove(c.metaPath(e.action))
+	c.idx.delete(e.action)
 	c.lru.Remove(e.lruEntry)
 	delete(c.entries, e.action)
-	c.size -= blockSize
 	if e.blob != nil {
 		e.blob.refs--
 		c.maybeDropBlobLocked(e.blob)
@@ -499,15 +483,21 @@ func (c *Cache) maybeDropBlobLocked(b *blob) {
 // Evict removes least recently used entries until the cache is no larger
 // than target. Pinned entries are skipped. It returns what was removed.
 func (c *Cache) Evict(target int64) (entries int, bytes int64) {
+	return c.evict(target, false)
+}
+
+// evict implements Evict; with all it removes every unpinned entry, even
+// entries of empty objects that do not count towards the size.
+func (c *Cache) evict(target int64, all bool) (entries int, bytes int64) {
 	const batch = 256 // bound lock hold time
 	for {
 		c.mu.Lock()
-		if c.size <= target {
+		if c.size <= target && !all {
 			c.mu.Unlock()
 			return entries, bytes
 		}
 		removed := 0
-		for el := c.lru.Back(); el != nil && removed < batch && c.size > target; {
+		for el := c.lru.Back(); el != nil && removed < batch && (all || c.size > target); {
 			e := el.Value.(*entry)
 			el = el.Prev()
 			if e.blob.pins > 0 {
@@ -522,7 +512,9 @@ func (c *Cache) Evict(target int64) (entries int, bytes int64) {
 		size := c.size
 		c.mu.Unlock()
 		if removed == 0 {
-			c.logf("evict: %d bytes left above target, the rest is pinned", size-target)
+			if !all && size > target {
+				c.logf("evict: %d bytes left above target, the rest is pinned", size-target)
+			}
 			return entries, bytes
 		}
 	}
@@ -550,7 +542,7 @@ func (c *Cache) Trim() (entries int, bytes int64) {
 
 // Clean removes every entry that is not pinned.
 func (c *Cache) Clean() (entries int, bytes int64) {
-	n, b := c.Evict(0)
+	n, b := c.evict(0, true)
 	c.stats.Cleans.Add(1)
 	return n, b
 }

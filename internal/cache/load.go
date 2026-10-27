@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,53 +23,73 @@ type scannedMeta struct {
 }
 
 type scanResult struct {
-	metas []scannedMeta
-	blobs map[string]int64 // output -> size
+	blobs  map[string]struct{} // outputs with an object file
+	legacy []string            // index entry files of the file-based index
 }
 
-// loadLocked rebuilds the in-memory index from disk. Index entries whose
-// object is missing and objects nobody references are deleted.
+// loadLocked rebuilds the in-memory index from the database and reconciles
+// it with the objects on disk: entries without an object and objects
+// without an entry are deleted. This also repairs what a crash or
+// "go clean -cache" left behind.
 func (c *Cache) loadLocked() error {
 	for i := range 256 {
 		if err := os.MkdirAll(filepath.Join(c.dir, fmt.Sprintf("%02x", i)), 0o755); err != nil {
 			return err
 		}
 	}
+	if err := c.idx.flush(); err != nil {
+		return err
+	}
 	res := c.scan()
-	c.entries = make(map[string]*entry, len(res.metas))
+	if len(res.legacy) > 0 {
+		if err := c.importLegacy(res.legacy); err != nil {
+			return err
+		}
+	}
+	rows, err := c.idx.load()
+	if err != nil {
+		return err
+	}
+	c.entries = make(map[string]*entry, len(rows))
 	c.blobs = make(map[string]*blob, len(res.blobs))
 	c.lru = list.New()
 	c.size = 0
 
-	for output, size := range res.blobs {
-		c.blobs[output] = &blob{output: output, size: size}
-		c.size += usage(size)
-	}
-	// Oldest last so that PushFront leaves the most recent at the front.
-	sort.Slice(res.metas, func(i, j int) bool { return res.metas[i].atime.Before(res.metas[j].atime) })
-	for _, m := range res.metas {
-		b := c.blobs[m.output]
-		if b == nil || b.size != m.size {
-			_ = os.Remove(c.metaPath(m.action))
+	// Rows come oldest first, so PushFront leaves the most recent at the
+	// front.
+	for _, r := range rows {
+		if _, ok := res.blobs[r.output]; !ok {
+			c.idx.delete(r.action)
 			continue
 		}
-		e := &entry{action: m.action, blob: b, putTime: m.putTime, atime: m.atime, touched: m.atime}
+		b := c.blobs[r.output]
+		if b == nil {
+			b = &blob{output: r.output, size: r.size}
+			c.blobs[r.output] = b
+			c.size += usage(r.size)
+		} else if b.size != r.size {
+			c.idx.delete(r.action)
+			continue
+		}
+		e := &entry{action: r.action, blob: b, putTime: r.putTime, atime: r.atime, touched: r.atime}
 		e.lruEntry = c.lru.PushFront(e)
-		c.entries[m.action] = e
+		c.entries[r.action] = e
 		b.refs++
-		c.size += blockSize
 	}
-	for _, b := range c.blobs {
-		c.maybeDropBlobLocked(b)
+	for output := range res.blobs {
+		if c.blobs[output] == nil {
+			_ = os.Remove(c.blobPath(output))
+		}
 	}
 	return c.writeSentinel()
 }
 
+// scan lists object files by name only: no per-file open or stat.
 func (c *Cache) scan() scanResult {
 	var (
 		mu  sync.Mutex
 		wg  sync.WaitGroup
-		res = scanResult{blobs: make(map[string]int64)}
+		res = scanResult{blobs: make(map[string]struct{})}
 		ch  = make(chan string)
 	)
 	for range 8 {
@@ -78,11 +97,19 @@ func (c *Cache) scan() scanResult {
 		go func() {
 			defer wg.Done()
 			for sub := range ch {
-				metas, blobs := c.scanDir(sub)
+				des, err := os.ReadDir(sub)
+				if err != nil {
+					continue
+				}
 				mu.Lock()
-				res.metas = append(res.metas, metas...)
-				for k, v := range blobs {
-					res.blobs[k] = v
+				for _, de := range des {
+					name := de.Name()
+					switch {
+					case strings.HasSuffix(name, blobSuffix):
+						res.blobs[strings.TrimSuffix(name, blobSuffix)] = struct{}{}
+					case strings.HasSuffix(name, metaSuffix):
+						res.legacy = append(res.legacy, filepath.Join(sub, name))
+					}
 				}
 				mu.Unlock()
 			}
@@ -96,33 +123,26 @@ func (c *Cache) scan() scanResult {
 	return res
 }
 
-func (c *Cache) scanDir(dir string) ([]scannedMeta, map[string]int64) {
-	des, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, nil
-	}
-	var metas []scannedMeta
-	blobs := make(map[string]int64)
-	for _, de := range des {
-		name := de.Name()
-		switch {
-		case strings.HasSuffix(name, metaSuffix):
-			m, err := c.readMeta(filepath.Join(dir, name))
-			if err != nil {
-				c.logf("drop bad index entry %s: %v", name, err)
-				_ = os.Remove(filepath.Join(dir, name))
-				continue
-			}
-			metas = append(metas, m)
-		case strings.HasSuffix(name, blobSuffix):
-			info, err := de.Info()
-			if err != nil {
-				continue
-			}
-			blobs[strings.TrimSuffix(name, blobSuffix)] = info.Size()
+// importLegacy moves index entries of the file-based index into the
+// database and removes the files.
+func (c *Cache) importLegacy(paths []string) error {
+	n := 0
+	for _, p := range paths {
+		m, err := c.readMeta(p)
+		if err == nil {
+			c.idx.add(op{kind: opUpsert, action: m.action, output: m.output, size: m.size,
+				putTime: m.putTime.UnixNano(), atime: m.atime.UnixNano()})
+			n++
 		}
 	}
-	return metas, blobs
+	if err := c.idx.flush(); err != nil {
+		return err
+	}
+	for _, p := range paths {
+		_ = os.Remove(p)
+	}
+	c.logf("imported %d entries of the file-based index", n)
+	return nil
 }
 
 func (c *Cache) readMeta(path string) (scannedMeta, error) {
@@ -208,7 +228,7 @@ func (c *Cache) CheckExternalClean() bool {
 			c.logf("restore sentinel: %v", err)
 		}
 		c.mu.Unlock()
-		n, _ := c.Evict(0)
+		n, _ := c.evict(0, true)
 		c.mu.Lock()
 		c.logf("go clean -cache detected: removed %d entries, size %d -> %d", n, before, c.size)
 		return true

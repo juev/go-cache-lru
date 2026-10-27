@@ -27,11 +27,27 @@ func (c *clock) Now() time.Time {
 func open(t *testing.T, dir string, maxSize, target int64) *Cache {
 	t.Helper()
 	clk := &clock{t: time.Now().Add(-time.Hour)}
+	return openClock(t, dir, maxSize, target, clk)
+}
+
+func openClock(t *testing.T, dir string, maxSize, target int64, clk *clock) *Cache {
+	t.Helper()
 	c, err := Open(Options{Dir: dir, MaxSize: maxSize, TargetSize: target, Now: clk.Now, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return c
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
 
 func action(i int) []byte {
@@ -217,32 +233,30 @@ func TestReplacedOutputDeletedAfterRelease(t *testing.T) {
 func TestReopenKeepsEntriesAndOrder(t *testing.T) {
 	dir := t.TempDir()
 	const obj = 10 * blockSize
-	c := open(t, dir, 1<<30, 1<<29)
+	clk := &clock{t: time.Now().Add(-time.Hour)}
+	c := openClock(t, dir, 1<<30, 1<<29, clk)
 	for i := range 3 {
 		l := c.NewLease()
 		put(t, c, l, action(i), body(i, obj))
 		l.Release()
 	}
-	// Make entry 0 the most recent on disk.
-	past := time.Now().Add(-48 * time.Hour)
-	for i := range 3 {
-		mt := past.Add(time.Duration(i) * time.Hour)
-		if i == 0 {
-			mt = time.Now()
-		}
-		if err := os.Chtimes(c.metaPath(fmt.Sprintf("%x", action(i))), mt, mt); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Access entry 0 late enough for the access to be recorded.
+	clk.advance(2 * touchInterval)
+	l := c.NewLease()
+	mustHit(t, c, l, action(0), body(0, obj))
+	l.Release()
 	size := c.Size()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	c2 := open(t, dir, 1<<30, 1<<29)
 	if c2.Size() != size {
 		t.Fatalf("size after reopen %d, want %d", c2.Size(), size)
 	}
 	// Evict down to one entry: the survivor must be entry 0.
-	c2.Evict(obj + blockSize)
-	l := c2.NewLease()
+	c2.Evict(obj)
+	l = c2.NewLease()
 	defer l.Release()
 	mustHit(t, c2, l, action(0), body(0, obj))
 	mustMiss(t, c2, action(1))
@@ -260,6 +274,9 @@ func TestReopenDropsDanglingFiles(t *testing.T) {
 	}
 	orphan := filepath.Join(dir, "ab", "ab00"+blobSuffix)
 	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
 	c2 := open(t, dir, 1<<30, 1<<29)
@@ -390,7 +407,6 @@ func TestConcurrentSessions(t *testing.T) {
 		}
 		want += usage(b.size)
 	}
-	want += int64(len(c.entries)) * blockSize
 	if want != c.size {
 		t.Fatalf("accounted size %d, recomputed %d", c.size, want)
 	}
@@ -449,4 +465,76 @@ func TestSeparateDirWatchesGoCache(t *testing.T) {
 		t.Fatal("sentinel not restored")
 	}
 	l.Release()
+}
+
+func TestImportsFileBasedIndex(t *testing.T) {
+	dir := t.TempDir()
+	// Lay out two entries the way the file-based index stored them.
+	put := time.Now().Add(-time.Hour)
+	for i := range 2 {
+		b := body(i, 3000)
+		out := sha256.Sum256(b)
+		oh, ah := fmt.Sprintf("%x", out), fmt.Sprintf("%x", action(i))
+		for _, d := range []string{oh[:2], ah[:2]} {
+			if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, oh[:2], oh+blobSuffix), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		meta := filepath.Join(dir, ah[:2], ah+metaSuffix)
+		if err := os.WriteFile(meta, fmt.Appendf(nil, "v1 %s %d %d\n", oh, len(b), put.UnixNano()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := open(t, dir, 1<<30, 1<<29)
+	for i := range 2 {
+		l := c.NewLease()
+		mustHit(t, c, l, action(i), body(i, 3000))
+		l.Release()
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*", "*"+metaSuffix)); len(left) != 0 {
+		t.Fatalf("legacy files left: %v", left)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The entries now live in the database.
+	c2 := open(t, dir, 1<<30, 1<<29)
+	if n := c2.Snapshot().Entries; n != 2 {
+		t.Fatalf("entries after reopen: %d", n)
+	}
+}
+
+func TestReopenAfterUnflushedChanges(t *testing.T) {
+	// A crash loses queued index changes; the next start must still be
+	// consistent with the files on disk.
+	dir := t.TempDir()
+	c := open(t, dir, 1<<30, 1<<29)
+	l := c.NewLease()
+	put(t, c, l, action(1), []byte("flushed"))
+	l.Release()
+	if err := c.idx.flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Hold off the background flush, then simulate the crash by dropping
+	// the queue instead of flushing it.
+	c.idx.flushMu.Lock()
+	l = c.NewLease()
+	e := put(t, c, l, action(2), []byte("queued"))
+	l.Release()
+	c.idx.mu.Lock()
+	c.idx.pending = nil
+	c.idx.mu.Unlock()
+	c.idx.flushMu.Unlock()
+
+	c2 := open(t, dir, 1<<30, 1<<29)
+	l = c2.NewLease()
+	defer l.Release()
+	mustHit(t, c2, l, action(1), []byte("flushed"))
+	mustMiss(t, c2, action(2))
+	if _, err := os.Stat(e.Path); !os.IsNotExist(err) {
+		t.Fatalf("object without index entry kept: %v", err)
+	}
 }

@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-// TestOpenScale measures how long Open takes to load a large cache.
+// TestOpenScale measures how long Open takes to load a large cache. The
+// generated cache uses the file-based index format, so the first run
+// includes importing it into SQLite and later runs load from SQLite.
 // It is a measurement, not a check, and runs only on request:
 //
 //	GOCACHELRU_SCALE=300000 go test -run TestOpenScale -v ./internal/cache
@@ -53,6 +55,9 @@ func TestOpenScale(t *testing.T) {
 			run+1, elapsed.Round(time.Millisecond), s.Entries, s.Objects,
 			float64(s.Size)/(1<<30), float64(int64(after.HeapAlloc)-int64(before.HeapAlloc))/(1<<20))
 		runtime.KeepAlive(c)
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
