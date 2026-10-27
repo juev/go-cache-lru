@@ -17,11 +17,14 @@ import (
 
 	"github.com/juev/go-cache-lru/internal/cache"
 	"github.com/juev/go-cache-lru/internal/protocol"
+	"github.com/juev/go-cache-lru/internal/storage"
 )
 
 // Options configure a Server.
 type Options struct {
 	Cache *cache.Cache
+	// Remote is an optional second storage tier.
+	Remote storage.Backend
 	// IdleTimeout stops the server after this long without sessions; 0
 	// disables it.
 	IdleTimeout time.Duration
@@ -34,6 +37,7 @@ type Options struct {
 type Server struct {
 	opts    Options
 	cache   *cache.Cache
+	remote  *remote
 	logf    func(string, ...any)
 	started time.Time
 
@@ -53,7 +57,7 @@ func New(opts Options) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{
+	s := &Server{
 		opts:     opts,
 		cache:    opts.Cache,
 		logf:     logf,
@@ -62,6 +66,10 @@ func New(opts Options) *Server {
 		conns:    make(map[net.Conn]struct{}),
 		idleFrom: time.Now(),
 	}
+	if opts.Remote != nil {
+		s.remote = newRemote(opts.Remote, opts.Cache, logf)
+	}
+	return s
 }
 
 // Shutdown asks Serve to stop gracefully.
@@ -128,6 +136,9 @@ loop:
 	s.Shutdown()
 	_ = ln.Close()
 	s.drain()
+	if s.remote != nil {
+		s.remote.close(s.opts.DrainTimeout)
+	}
 	cancelBg()
 	bgDone.Wait()
 	if serr := s.cache.SaveStats(); serr != nil {
@@ -276,6 +287,9 @@ func (s *Server) get(l *cache.Lease, req *protocol.Request) *protocol.Response {
 	if err != nil {
 		return &protocol.Response{ID: req.ID, Err: err.Error()}
 	}
+	if !ok && s.remote != nil {
+		e, ok = s.remote.fetch(l, req.ActionID)
+	}
 	if !ok {
 		return &protocol.Response{ID: req.ID, Miss: true}
 	}
@@ -286,6 +300,9 @@ func (s *Server) put(l *cache.Lease, req *protocol.Request) *protocol.Response {
 	e, err := s.cache.Put(l, req.ActionID, req.OutputID, req.BodySize, req.Body)
 	if err != nil {
 		return &protocol.Response{ID: req.ID, Err: err.Error()}
+	}
+	if s.remote != nil {
+		s.remote.enqueue(req.ActionID, e)
 	}
 	return &protocol.Response{ID: req.ID, DiskPath: e.Path}
 }

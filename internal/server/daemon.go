@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,6 +13,9 @@ import (
 
 	"github.com/juev/go-cache-lru/internal/cache"
 	"github.com/juev/go-cache-lru/internal/config"
+	"github.com/juev/go-cache-lru/internal/storage"
+	_ "github.com/juev/go-cache-lru/internal/storage/filestore" // file:// driver
+	_ "github.com/juev/go-cache-lru/internal/storage/s3store"   // s3:// driver
 )
 
 // ErrAlreadyRunning means another daemon owns the cache directory.
@@ -87,8 +91,18 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 	defer func() { _ = os.Remove(cfg.Socket) }()
 	logf("listening on %s (pid %d)", cfg.Socket, os.Getpid())
 
+	var backend storage.Backend
+	if cfg.Remote != "" {
+		backend, err = storage.Open(ctx, cfg.Remote)
+		if err != nil {
+			return err
+		}
+		logf("remote storage %s", redact(cfg.Remote))
+	}
+
 	srv := New(Options{
 		Cache:        c,
+		Remote:       backend,
 		IdleTimeout:  cfg.IdleTimeout,
 		DrainTimeout: cfg.DrainTimeout,
 		Logf:         logf,
@@ -100,4 +114,13 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 	err = srv.Serve(ctx, ln)
 	logf("stopped")
 	return err
+}
+
+// redact hides URL credentials in logs.
+func redact(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(invalid URL)"
+	}
+	return u.Redacted()
 }

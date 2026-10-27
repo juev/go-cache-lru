@@ -359,3 +359,40 @@ func TestFlagsSeparateDir(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestRemoteTier builds on one machine and reads the results on another
+// through shared remote storage.
+func TestRemoteTier(t *testing.T) {
+	shared := "--remote=file://" + t.TempDir()
+	dirA, dirB := t.TempDir(), t.TempDir()
+	a := newEnv(t, "GOCACHEPROG="+pluginBin+" --dir="+dirA+" "+shared)
+	a.ctl = []string{"--dir=" + dirA}
+	mod := writeModule(t, "")
+	if out, err := a.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build A: %v\n%s", err, out)
+	}
+	// Uploads are asynchronous; stopping the daemon flushes them.
+	if out, err := a.plugin("stop"); err != nil {
+		t.Fatalf("stop A: %v\n%s", err, out)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := a.plugin("stats"); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon A did not stop")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	b := newEnv(t, "GOCACHEPROG="+pluginBin+" --dir="+dirB+" "+shared)
+	b.ctl = []string{"--dir=" + dirB}
+	if out, err := b.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build B: %v\n%s", err, out)
+	}
+	k := b.stats().Cache.Counters
+	if k.RemoteHits == 0 || k.RemoteErrors != 0 {
+		t.Fatalf("remote counters on B: %+v", k)
+	}
+}
