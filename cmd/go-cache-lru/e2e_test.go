@@ -157,6 +157,16 @@ func TestBuildUsesSharedCache(t *testing.T) {
 	if !strings.Contains(out, "(cached)") {
 		t.Fatalf("second go test not cached:\n%s", out)
 	}
+	// go clean -testcache expires results through entry put times.
+	if out, err := e.run(mod, "go", "clean", "-testcache"); err != nil {
+		t.Fatalf("clean -testcache: %v\n%s", err, out)
+	}
+	if out, err = e.run(mod, "go", "test", "./..."); err != nil {
+		t.Fatalf("test after clean -testcache: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "(cached)") {
+		t.Fatalf("go test cached after clean -testcache:\n%s", out)
+	}
 
 	// The go command's own cache must stay unused.
 	native, _ := filepath.Glob(filepath.Join(e.cache, "*", "*-d"))
