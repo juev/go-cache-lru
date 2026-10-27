@@ -247,6 +247,7 @@ cache: the first real statistics showed 177.9 MiB in 875 objects (about
 | `Open`, warm page cache | 6.6–15.4 s over 6 runs | 0.55–0.57 s over 9 runs |
 | Memory for the index | about 150 MiB of heap | about 100 MiB of heap |
 | On disk for the index | 300,000 files | 54 MB `index.db` |
+| Binary size | 11.6 MiB | 17.4 MiB |
 
 With files, 97% of startup went to system calls (CPU profile), 84% to
 reading index entries one file at a time, and the time followed the load on

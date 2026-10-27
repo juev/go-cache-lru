@@ -71,7 +71,10 @@ func openIndex(path string, logf func(string, ...any)) (*index, error) {
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "busy_timeout(10000)")
-	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	// url.URL escapes "?", "#" and "%" in the path, which SQLite would
+	// otherwise parse as URI syntax.
+	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: q.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +134,17 @@ func (x *index) flush() error {
 	if len(ops) == 0 {
 		return nil
 	}
+	if err := x.apply(ops); err != nil {
+		// Keep the batch, ahead of newer changes, for the next flush.
+		x.mu.Lock()
+		x.pending = append(ops, x.pending...)
+		x.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (x *index) apply(ops []op) error {
 	tx, err := x.db.Begin()
 	if err != nil {
 		return err

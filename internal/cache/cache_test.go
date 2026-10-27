@@ -538,3 +538,52 @@ func TestReopenAfterUnflushedChanges(t *testing.T) {
 		t.Fatalf("object without index entry kept: %v", err)
 	}
 }
+
+func TestIndexPathWithURISyntax(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a?b#c%41")
+	c := open(t, dir, 1<<30, 1<<29)
+	l := c.NewLease()
+	put(t, c, l, action(1), []byte("x"))
+	l.Release()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, StateDirName, "index.db")); err != nil {
+		t.Fatalf("index not at the expected path: %v", err)
+	}
+	c2 := open(t, dir, 1<<30, 1<<29)
+	l = c2.NewLease()
+	defer l.Release()
+	mustHit(t, c2, l, action(1), []byte("x"))
+}
+
+func TestFailedFlushKeepsBatch(t *testing.T) {
+	c := open(t, t.TempDir(), 1<<30, 1<<29)
+	c.idx.flushMu.Lock()
+	l := c.NewLease()
+	put(t, c, l, action(1), []byte("x"))
+	l.Release()
+	ops := c.idx.pending
+	c.idx.pending = nil
+	c.idx.flushMu.Unlock()
+
+	// A batch whose transaction fails must stay queued.
+	if _, err := c.idx.db.Exec(`ALTER TABLE entries RENAME TO broken`); err != nil {
+		t.Fatal(err)
+	}
+	c.idx.mu.Lock()
+	c.idx.pending = append(ops, c.idx.pending...)
+	c.idx.mu.Unlock()
+	// This flush or the background one fails; either must keep the batch.
+	_ = c.idx.flush()
+	if _, err := c.idx.db.Exec(`ALTER TABLE broken RENAME TO entries`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.idx.flush(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.idx.load()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %v, err %v", rows, err)
+	}
+}
