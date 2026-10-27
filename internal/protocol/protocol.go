@@ -28,12 +28,13 @@ const (
 )
 
 // Control commands understood by the daemon. The go command never sends
-// them; they are used by the go-cache-plugin CLI over the same socket.
+// them; they are used by the go-cache-lru CLI over the same socket.
 const (
-	CmdStats    Cmd = "x-stats"
-	CmdClean    Cmd = "x-clean"
-	CmdTrim     Cmd = "x-trim"
-	CmdShutdown Cmd = "x-shutdown"
+	CmdStats      Cmd = "x-stats"
+	CmdStatsReset Cmd = "x-stats-reset"
+	CmdClean      Cmd = "x-clean"
+	CmdTrim       Cmd = "x-trim"
+	CmdShutdown   Cmd = "x-shutdown"
 )
 
 // Request is a message from the go command.
