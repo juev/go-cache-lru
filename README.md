@@ -128,7 +128,7 @@ subdirectories of `GOCACHE`. go-cache-lru keeps a sentinel file in one of
 them and checks it every two seconds:
 
 - with the cache in `GOCACHE`, the clean has already removed its files, and
-  the daemon rebuilds its index from what is left;
+  the daemon drops the index entries whose objects are gone;
 - with a separate `--dir`, the daemon removes every entry not in use.
 
 `go clean -testcache` works unchanged: entries carry their put time, which
@@ -180,14 +180,14 @@ relays bytes between the go command and a daemon session. The daemon:
 - owns the directory through an exclusive `flock` on
   `<dir>/gocacheprog/daemon.lock`; the lock dies with the process, so a
   crash never blocks the next start;
-- stores an object once per output ID (`xx/<output>-pd`) and an index entry
-  per action ID (`xx/<action>-pa`), so identical outputs of different actions
-  share one file; the suffixes differ from the go command's own `-a`/`-d`
-  files, so its age-based trimming never touches them;
+- stores an object once per output ID (`xx/<output>-pd`), so identical
+  outputs of different actions share one file; the suffix differs from the
+  go command's own `-a`/`-d` files, so its age-based trimming never touches
+  them;
 - verifies that each body matches its output ID (SHA-256) before storing it;
-- keeps the LRU index in memory and rebuilds it from disk on start,
-  deleting index entries without objects and objects without index entries;
-- writes access times to disk at most once a minute per entry;
+- keeps the LRU index in memory and persists it in SQLite
+  (`<dir>/gocacheprog/index.db`, see [below](#index-in-sqlite));
+- writes access times to the index at most once a minute per entry;
 - evicts in batches of 256 entries per lock hold, in the background, right
   after the put that crossed the limit and again when a session releases its
   pins.
@@ -202,53 +202,74 @@ When the shutdown timeout expires, the daemon closes the remaining sessions.
 Their go commands then fail with "GOCACHEPROG exited pre-Close", so set
 `--shutdown-timeout` longer than the longest test run if that matters.
 
-### Why files and not SQLite
+### Index in SQLite
 
 The go command reads objects from the paths the daemon returns, so objects
-are files in any case. A database would hold only the index, which makes two
-sources of truth: `go clean -cache` deletes files but not rows, and a crash
-between a rename and a commit leaves a file without a row or a row without a
-file. Repairing that needs the same directory scan the daemon does now. With
-the index in files, each entry is one atomic rename, and the directory is
-always consistent with itself. Only the daemon writes, so SQLite's
-multi-process locking would not be used, and in Go SQLite means either cgo
-or a much larger pure-Go build.
+are files. Only the index lives in SQLite (pure-Go `modernc.org/sqlite`, no
+cgo): one row per action ID with the output ID, size, put time and last
+access time.
 
-The price is startup time: the daemon reads every index entry when it
-starts.
+The cache never waits for the database. Get and put work on the in-memory
+index under one mutex, as before. Changes go to a queue in order, and a
+background goroutine writes them in one transaction every 100 ms. Shutdown
+writes what is left.
 
-### Startup cost
+The database and the object files can disagree: `go clean -cache` deletes
+files but not rows, and a crash loses up to 100 ms of queued changes. So
+every start, and every detected `go clean -cache`, reconciles the two. The
+daemon lists object files by name (`ReadDir`, no per-file open or stat),
+deletes rows whose object is missing and deletes objects that no row
+references. A crash therefore costs at most the last 100 ms of cache
+entries, never consistency.
 
-`TestOpenScale` in `internal/cache` generates a synthetic cache and measures
-`Open`:
+Index entry files of the earlier file-based index (`xx/<action>-pa`) are
+imported into the database on the first start and removed.
+
+### Measurements
+
+Measured on 2026-10-27 on an Apple Silicon Mac (12 cores, APFS) with
+Go 1.27.0, comparing the SQLite index with the earlier file-based index (one
+`-pa` file per entry, its mtime as access time).
+
+**Startup.** `TestOpenScale` in `internal/cache` generates a synthetic cache
+and measures `Open`:
 
 ```sh
 GOCACHELRU_SCALE=300000 go test -run TestOpenScale -v ./internal/cache
 ```
 
-Measured on 2026-10-27, Apple Silicon Mac (12 cores, APFS), Go 1.27.0.
-300,000 index entries over 150,000 objects, 450,000 files in total. This is
-roughly a full 30 GiB cache: the first real statistics showed 177.9 MiB in
-875 objects (about 200 KiB each) and two index entries per object.
+300,000 index entries over 150,000 objects. This is roughly a full 30 GiB
+cache: the first real statistics showed 177.9 MiB in 875 objects (about
+200 KiB each) and two index entries per object.
 
-| | Result |
-|---|---|
-| `Open`, warm page cache | 6.6–15.4 s over 6 runs |
-| Memory for the index | about 150 MiB of heap |
-| Where the time goes (`-cpuprofile`) | 97% in system calls; 84% in reading index entries (open, read, close, stat per file) |
+| | File-based index | SQLite index |
+|---|---|---|
+| `Open`, warm page cache | 6.6–15.4 s over 6 runs | 0.55–0.57 s over 9 runs |
+| Memory for the index | about 150 MiB of heap | about 100 MiB of heap |
+| On disk for the index | 300,000 files | 54 MB `index.db` |
 
-A cold page cache, right after boot, was not measured (`purge` needs root)
-and will be slower.
+With files, 97% of startup went to system calls (CPU profile), 84% to
+reading index entries one file at a time, and the time followed the load on
+the machine. A cold page cache, right after boot, was measured for neither
+(`purge` needs root).
 
-The spread follows the load on the machine: the scan is bound by file system
-calls, not CPU. The daemon opens the cache before it listens, so after a
-`stop` or a reboot the first go command waits for the scan. Later go
-commands, and every build while the daemon runs, do not.
+Importing a file-based index of this size took 42 s once. A cache that was
+cleaned with `go clean -cache` before switching has nothing to import.
 
-If the wait becomes a problem, the fix is a snapshot of the index written on
-graceful shutdown and read on start, with the full scan only after a crash.
-That is one file read instead of 300,000, and the files stay the source of
-truth.
+**Hot path.** A parallel benchmark on the cache package (12 goroutines, 4 KiB
+objects, 3 runs of 3 s each):
+
+| | File-based index | SQLite index |
+|---|---|---|
+| Put | 251–265 µs/op | 110–117 µs/op |
+| Get, hit | 4.5–4.9 µs/op | 1.43–1.47 µs/op |
+
+A put no longer writes and renames an index file under the lock, and a get
+no longer updates a file's mtime.
+
+**Size accounting** counts only objects, rounded up to 4 KiB blocks. The
+file-based index also counted 4 KiB per index file; the database is not
+counted (54 MB at 300,000 entries).
 
 ## Other implementations
 
