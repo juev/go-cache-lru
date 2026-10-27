@@ -406,3 +406,42 @@ func TestRemoteTier(t *testing.T) {
 		t.Fatalf("remote counters on B: %+v", k)
 	}
 }
+
+// TestGoCommandDuringDrain starts a build while the previous daemon is
+// still waiting for a long test: the build must wait for the successor
+// daemon instead of failing.
+func TestGoCommandDuringDrain(t *testing.T) {
+	e := newEnv(t)
+	mod := writeModule(t, "")
+	slow := filepath.Join(mod, "slow", "slow_test.go")
+	if err := os.MkdirAll(filepath.Dir(slow), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slow, []byte("package slow\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(15 * time.Second) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	slowDone := make(chan error, 1)
+	go func() {
+		out, err := e.run(mod, "go", "test", "-count=1", "./slow")
+		if err != nil {
+			err = fmt.Errorf("%v\n%s", err, out)
+		}
+		slowDone <- err
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for e.statsOrZero().ActiveSessions == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("session never became active")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out, err := e.plugin("stop"); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build during drain: %v\n%s", err, out)
+	}
+	if err := <-slowDone; err != nil {
+		t.Fatalf("slow test: %v", err)
+	}
+}

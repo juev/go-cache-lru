@@ -195,7 +195,8 @@ relays bytes between the go command and a daemon session. The daemon:
 Clients that start at once take `<dir>/gocacheprog/spawn.lock`, so a
 parallel build starts one daemon, not one per go command. A daemon that is
 still draining holds the lock, and its successor waits for it
-(`serve --lock-wait`).
+(`serve --lock-wait`, by default the shutdown timeout plus 15 s), so a go
+command started during a shutdown waits instead of failing.
 
 When the shutdown timeout expires, the daemon closes the remaining sessions.
 Their go commands then fail with "GOCACHEPROG exited pre-Close", so set

@@ -42,7 +42,7 @@ func run(args []string) error {
 	fs.Usage = func() { usage(fs.Output(), fs) }
 	flags := config.Register(fs)
 	o := new(cmdOpts)
-	fs.DurationVar(&o.lockWait, "lock-wait", 10*time.Second, "serve: how long to wait for a previous daemon to exit")
+	fs.DurationVar(&o.lockWait, "lock-wait", 0, "serve: how long to wait for a previous daemon to exit (default: shutdown timeout + 15s)")
 	fs.BoolVar(&o.json, "json", false, "stats: print JSON")
 	fs.BoolVar(&o.reset, "reset", false, "stats: reset counters")
 
@@ -120,7 +120,12 @@ func serve(cfg config.Config, o *cmdOpts) error {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
-	err := server.Run(ctx, cfg, o.lockWait, logger.Printf)
+	lockWait := o.lockWait
+	if lockWait == 0 {
+		// A previous daemon may still be draining its sessions.
+		lockWait = cfg.DrainTimeout + 15*time.Second
+	}
+	err := server.Run(ctx, cfg, lockWait, logger.Printf)
 	if errors.Is(err, server.ErrAlreadyRunning) {
 		logger.Printf("%v; exiting", err)
 		return nil

@@ -19,8 +19,9 @@ import (
 	"github.com/juev/go-cache-lru/internal/server"
 )
 
-// StartTimeout bounds how long a client waits for an autostarted daemon.
-// Opening a large cache scans its index, which takes a few seconds.
+// StartTimeout bounds how long a client waits for an autostarted daemon,
+// on top of the shutdown timeout: a previous daemon may still be draining
+// its sessions, and opening a large cache scans its index.
 const StartTimeout = time.Minute
 
 // Dial connects to the daemon without starting it.
@@ -35,7 +36,8 @@ func Connect(cfg config.Config) (net.Conn, error) {
 	}
 	// Serialize autostart so that a parallel build does not spawn a daemon
 	// per go command.
-	lock, err := server.LockFile(cfg.SpawnLockPath(), StartTimeout)
+	wait := cfg.DrainTimeout + StartTimeout
+	lock, err := server.LockFile(cfg.SpawnLockPath(), wait)
 	if err != nil {
 		return nil, fmt.Errorf("spawn lock: %w", err)
 	}
@@ -46,14 +48,14 @@ func Connect(cfg config.Config) (net.Conn, error) {
 	if err := spawn(cfg); err != nil {
 		return nil, err
 	}
-	deadline := time.Now().Add(StartTimeout)
+	deadline := time.Now().Add(wait)
 	for {
 		conn, err := Dial(cfg)
 		if err == nil {
 			return conn, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("daemon did not start within %v (see %s): %w", StartTimeout, cfg.LogPath(), err)
+			return nil, fmt.Errorf("daemon did not start within %v (see %s): %w", wait, cfg.LogPath(), err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

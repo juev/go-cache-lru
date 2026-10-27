@@ -328,21 +328,36 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 	}
 
 	var tmp string
-	if b == nil {
-		tmp, err = c.writeTemp(outputID, size, body)
-		if err != nil {
-			return Entry{}, err
+	defer func() {
+		if tmp != "" {
+			_ = os.Remove(tmp)
 		}
-		defer func() {
-			if tmp != "" {
-				_ = os.Remove(tmp)
+	}()
+	for {
+		if b == nil && tmp == "" {
+			tmp, err = c.writeTemp(outputID, size, body)
+			if err != nil {
+				return Entry{}, err
 			}
-		}()
+		}
+		c.mu.Lock()
+		if b == nil || c.blobs[output] == b {
+			break
+		}
+		// A rescan after "go clean -cache" detached the object we pinned.
+		// Use what the rescan found, or write the body after all; it has
+		// not been read yet.
+		if cur := c.blobs[output]; cur != nil && cur.size == size {
+			l.pinLocked(cur)
+			b = cur
+			break
+		}
+		b = nil
+		c.mu.Unlock()
 	}
+	defer c.mu.Unlock()
 
 	now := c.now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if b == nil {
 		if err := renameMkdir(tmp, blobPath); err != nil {
 			return Entry{}, err

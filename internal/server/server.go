@@ -74,6 +74,10 @@ func New(opts Options) *Server {
 
 // Shutdown asks Serve to stop gracefully.
 func (s *Server) Shutdown() {
+	// Under s.mu so that track either registers a session before drain
+	// starts waiting or sees the shutdown and refuses it.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.shutdownOnce.Do(func() { close(s.shutdown) })
 }
 
