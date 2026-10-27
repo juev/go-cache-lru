@@ -24,10 +24,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/client"
-	"github.com/juev/go-cache-plugin/internal/config"
-	"github.com/juev/go-cache-plugin/internal/protocol"
-	"github.com/juev/go-cache-plugin/internal/server"
+	"github.com/juev/go-cache-lru/internal/client"
+	"github.com/juev/go-cache-lru/internal/config"
+	"github.com/juev/go-cache-lru/internal/protocol"
+	"github.com/juev/go-cache-lru/internal/server"
 )
 
 func main() {

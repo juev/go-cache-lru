@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/cache"
-	"github.com/juev/go-cache-plugin/internal/protocol"
+	"github.com/juev/go-cache-lru/internal/cache"
+	"github.com/juev/go-cache-lru/internal/protocol"
 )
 
 // Options configure a Server.

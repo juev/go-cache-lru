@@ -1,3 +1,3 @@
-module github.com/juev/go-cache-plugin
+module github.com/juev/go-cache-lru
 
 go 1.24

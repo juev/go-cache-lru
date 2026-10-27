@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/cache"
-	"github.com/juev/go-cache-plugin/internal/config"
+	"github.com/juev/go-cache-lru/internal/cache"
+	"github.com/juev/go-cache-lru/internal/config"
 )
 
 // ErrAlreadyRunning means another daemon owns the cache directory.

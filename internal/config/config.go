@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/cache"
+	"github.com/juev/go-cache-lru/internal/cache"
 )
 
 // Environment variables.

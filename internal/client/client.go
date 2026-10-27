@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/config"
-	"github.com/juev/go-cache-plugin/internal/protocol"
-	"github.com/juev/go-cache-plugin/internal/server"
+	"github.com/juev/go-cache-lru/internal/config"
+	"github.com/juev/go-cache-lru/internal/protocol"
+	"github.com/juev/go-cache-lru/internal/server"
 )
 
 // StartTimeout bounds how long a client waits for an autostarted daemon.

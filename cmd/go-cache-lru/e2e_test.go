@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juev/go-cache-plugin/internal/server"
+	"github.com/juev/go-cache-lru/internal/server"
 )
 
 // These tests drive the real go command through the plugin binary.
