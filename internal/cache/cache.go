@@ -8,10 +8,12 @@
 //	                 its mtime is the last access time (LRU key)
 //	xx/<output>-pd   object body, shared by all actions with this output
 //	ff/.gocacheprog  sentinel that disappears on "go clean -cache"
+//	                 (kept in GOCACHE when the cache lives elsewhere)
 //	gocacheprog/     daemon state: temp files, stats, lock, socket
 //
-// The two-hex-digit directories are what "go clean -cache" removes, so a
-// clean wipes our objects too. The suffixes differ from the go command's
+// The two-hex-digit directories are what "go clean -cache" removes, so with
+// the cache in GOCACHE a clean wipes our objects too; with a separate
+// directory the daemon empties it when the sentinel in GOCACHE disappears. The suffixes differ from the go command's
 // own "-a"/"-d" files, so its trimming never touches our files.
 package cache
 
@@ -54,6 +56,10 @@ var ErrInvalidID = errors.New("invalid cache ID")
 type Options struct {
 	// Dir is the cache directory, normally GOCACHE.
 	Dir string
+	// GoCache is the go command's GOCACHE. "go clean -cache" removes its
+	// two-hex-digit subdirectories; a sentinel file there detects that.
+	// Empty means Dir.
+	GoCache string
 	// MaxSize triggers eviction when the cache grows above it.
 	MaxSize int64
 	// TargetSize is the size eviction shrinks the cache to.
@@ -91,6 +97,7 @@ type blob struct {
 // Cache is the local store. It is safe for concurrent use.
 type Cache struct {
 	dir      string
+	goCache  string
 	stateDir string
 	tmpDir   string
 	opts     Options
@@ -128,6 +135,12 @@ func Open(opts Options) (*Cache, error) {
 		evictCh:  make(chan struct{}, 1),
 	}
 	c.tmpDir = filepath.Join(c.stateDir, "tmp")
+	c.goCache = dir
+	if opts.GoCache != "" {
+		if c.goCache, err = filepath.Abs(opts.GoCache); err != nil {
+			return nil, err
+		}
+	}
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -201,6 +214,18 @@ func (l *Lease) Release() {
 		c.maybeDropBlobLocked(b)
 	}
 	clear(l.pins)
+	// Eviction skips pinned objects, so a session that pinned most of the
+	// cache may have left it above the limit.
+	c.signalEvictLocked()
+}
+
+func (c *Cache) signalEvictLocked() {
+	if c.size > c.opts.MaxSize {
+		select {
+		case c.evictCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (l *Lease) pinLocked(b *blob) {
@@ -359,12 +384,7 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 
 	c.stats.Puts.Add(1)
 	c.stats.PutBytes.Add(size)
-	if c.size > c.opts.MaxSize {
-		select {
-		case c.evictCh <- struct{}{}:
-		default:
-		}
-	}
+	c.signalEvictLocked()
 	return Entry{OutputID: outputID, Size: size, Time: now, Path: blobPath}, nil
 }
 

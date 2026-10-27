@@ -3,6 +3,8 @@ package cache
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -168,7 +170,13 @@ func (c *Cache) removeStaleTemps() {
 }
 
 func (c *Cache) sentinelPath() string {
-	return filepath.Join(c.dir, sentinelDir, sentinelName)
+	name := sentinelName
+	if c.goCache != c.dir {
+		// Several caches may watch one GOCACHE.
+		sum := sha256.Sum256([]byte(c.dir))
+		name += "-" + hex.EncodeToString(sum[:6])
+	}
+	return filepath.Join(c.goCache, sentinelDir, name)
 }
 
 func (c *Cache) writeSentinel() error {
@@ -176,7 +184,7 @@ func (c *Cache) writeSentinel() error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte("go-cache-plugin: removed by go clean -cache\n"), 0o644)
+	return os.WriteFile(p, []byte("go-cache-lru: removed by go clean -cache\n"), 0o644)
 }
 
 // CheckExternalClean detects "go clean -cache" (or a manual wipe) by the
@@ -192,12 +200,24 @@ func (c *Cache) CheckExternalClean() bool {
 		return false
 	}
 	before := c.size
+	c.stats.ExternalCleans.Add(1)
+	if c.goCache != c.dir {
+		// Our files are elsewhere: do what the user asked for and drop
+		// everything not in use.
+		if err := c.writeSentinel(); err != nil {
+			c.logf("restore sentinel: %v", err)
+		}
+		c.mu.Unlock()
+		n, _ := c.Evict(0)
+		c.mu.Lock()
+		c.logf("go clean -cache detected: removed %d entries, size %d -> %d", n, before, c.size)
+		return true
+	}
 	// Pinned objects of live sessions are detached; leases still hold the
 	// old records and simply forget them on release.
 	if err := c.loadLocked(); err != nil {
 		c.logf("rebuild index after external clean: %v", err)
 	}
-	c.stats.ExternalCleans.Add(1)
 	c.logf("cache directory was cleaned externally: index rebuilt, size %d -> %d", before, c.size)
 	return true
 }

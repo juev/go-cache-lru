@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -396,4 +397,56 @@ func TestConcurrentSessions(t *testing.T) {
 	if c.size > c.opts.MaxSize {
 		t.Fatalf("size %d above limit", c.size)
 	}
+}
+
+func TestEvictsAfterPinsReleased(t *testing.T) {
+	const obj = 10 * blockSize
+	c := open(t, t.TempDir(), 3*(obj+blockSize), 2*(obj+blockSize))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// One session pins everything it puts, so eviction cannot run yet.
+	l := c.NewLease()
+	for i := range 6 {
+		put(t, c, l, action(i), body(i, obj))
+	}
+	time.Sleep(50 * time.Millisecond)
+	if c.Snapshot().Entries != 6 {
+		t.Fatal("pinned entries evicted")
+	}
+	l.Release()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.Size() > 2*(obj+blockSize) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no eviction after release, size %d", c.Size())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSeparateDirWatchesGoCache(t *testing.T) {
+	dir, gocache := t.TempDir(), t.TempDir()
+	c, err := Open(Options{Dir: dir, GoCache: gocache, MaxSize: 1 << 30, TargetSize: 1 << 29, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := c.NewLease()
+	held := put(t, c, l, action(1), []byte("in use"))
+	other := c.NewLease()
+	put(t, c, other, action(2), []byte("free"))
+	other.Release()
+
+	simulateGoClean(t, gocache)
+	if !c.CheckExternalClean() {
+		t.Fatal("clean not detected")
+	}
+	mustMiss(t, c, action(2))
+	if _, err := os.Stat(held.Path); err != nil {
+		t.Fatalf("pinned object removed: %v", err)
+	}
+	if c.CheckExternalClean() {
+		t.Fatal("sentinel not restored")
+	}
+	l.Release()
 }
