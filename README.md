@@ -42,12 +42,18 @@ limit.
 
 ## Install
 
+Prebuilt binaries for macOS and Linux (amd64, arm64) are on the
+[releases page](https://github.com/juev/go-cache-lru/releases). Or build from
+source:
+
 ```sh
 go install github.com/juev/go-cache-lru/cmd/go-cache-lru@latest
 ```
 
-Requires Go 1.24 or newer (GOCACHEPROG is available without
-`GOEXPERIMENT` since 1.24). macOS and Linux.
+Building from source needs Go 1.26 or newer (required by the SQLite
+driver). The go command that uses the cache needs 1.24 or newer: GOCACHEPROG
+is available without `GOEXPERIMENT` since 1.24. Windows is not supported
+yet.
 
 ## Use
 
@@ -300,3 +306,7 @@ size limit.
 go test -race ./...        # includes end-to-end tests with the real go command
 go test -short ./...       # unit tests only
 ```
+
+## License
+
+[MIT](LICENSE)

@@ -367,8 +367,16 @@ func (s *Server) status() Status {
 	}
 }
 
-// Version reports the module version of the binary.
+// version is set by release builds:
+// -ldflags "-X github.com/juev/go-cache-lru/internal/server.version=..."
+var version string
+
+// Version reports the release version, or the module version and VCS
+// revision for other builds.
 func Version() string {
+	if version != "" {
+		return version
+	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		v := bi.Main.Version
 		for _, st := range bi.Settings {
