@@ -177,7 +177,8 @@ command starts the new binary. `go-cache-lru stop` switches at once.
 
 `go clean -cache` does not start GOCACHEPROG. It deletes the two-hex-digit
 subdirectories of `GOCACHE`. go-cache-lru keeps a sentinel file in one of
-them and checks it every two seconds:
+them and checks it when a go command or a control command connects, before
+serving it, and every two seconds while go commands run:
 
 - with the cache in `GOCACHE`, the clean has already removed its files, and
   the daemon drops the index entries whose objects are gone;
@@ -262,9 +263,15 @@ cgo): one row per action ID with the output ID, size, put time and last
 access time.
 
 The cache never waits for the database. Get and put work on the in-memory
-index under one mutex, as before. Changes go to a queue in order, and a
-background goroutine writes them in one transaction every 100 ms. Shutdown
-writes what is left.
+index under one mutex, as before. Changes go to a queue in order. The
+first change in an empty queue wakes a background goroutine, which waits
+100 ms for the rest of the burst and writes the batch in one transaction.
+Shutdown writes what is left.
+
+An idle daemon does not wake up: the index goroutine sleeps until a change
+arrives, the `go clean -cache` check and the periodic saving of statistics
+run only while go commands are active, and statistics are written only
+when they changed.
 
 The database and the object files can disagree: `go clean -cache` deletes
 files but not rows, and a crash loses up to 100 ms of queued changes. So

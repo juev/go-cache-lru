@@ -119,6 +119,9 @@ type Cache struct {
 	idx     *index
 	evictCh chan struct{}
 	stats   *Counters
+
+	saveMu sync.Mutex
+	saved  *CountersSnapshot // last written to stats.json
 }
 
 // Open opens or creates the cache in opts.Dir and loads its index.
@@ -625,7 +628,18 @@ func (c *Cache) Snapshot() Snapshot {
 	return s
 }
 
-// SaveStats persists the cumulative counters.
+// SaveStats persists the cumulative counters. It skips the write when
+// nothing changed since the last save.
 func (c *Cache) SaveStats() error {
-	return c.stats.save(c.statsPath(), c.tmpDir)
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	snap := c.stats.Snapshot()
+	if c.saved != nil && *c.saved == snap {
+		return nil
+	}
+	if err := c.stats.save(c.statsPath(), c.tmpDir, snap); err != nil {
+		return err
+	}
+	c.saved = &snap
+	return nil
 }

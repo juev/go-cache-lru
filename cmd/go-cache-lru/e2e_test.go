@@ -242,16 +242,10 @@ func TestGoCleanCache(t *testing.T) {
 	if out, err := e.run(mod, "go", "clean", "-cache"); err != nil {
 		t.Fatalf("go clean: %v\n%s", err, out)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		st := e.stats()
-		if st.Cache.Counters.ExternalCleans == 1 && st.Cache.Entries == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("go clean -cache not detected: %+v", st.Cache)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Nothing polls while the daemon is idle: the first connection after
+	// the clean must notice it before it is served.
+	if st := e.stats(); st.Cache.Counters.ExternalCleans != 1 || st.Cache.Entries != 0 {
+		t.Fatalf("go clean -cache not detected on the next connection: %+v", st.Cache)
 	}
 	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
 		t.Fatalf("build after clean: %v\n%s", err, out)

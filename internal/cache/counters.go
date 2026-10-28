@@ -104,8 +104,8 @@ func loadCounters(path string) *Counters {
 	return c
 }
 
-func (c *Counters) save(path, tmpDir string) error {
-	data, err := json.MarshalIndent(c.Snapshot(), "", "  ")
+func (c *Counters) save(path, tmpDir string, snap CountersSnapshot) error {
+	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return err
 	}
