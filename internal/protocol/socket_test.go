@@ -14,17 +14,18 @@ func TestSetBuffers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			_ = c.Close()
-		}
-	}()
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
+	// Keep the peer open: macOS ignores buffer sizes on a socket whose
+	// peer has already closed.
+	peer, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = peer.Close() }()
 
 	raw, err := conn.(*net.UnixConn).SyscallConn()
 	if err != nil {
