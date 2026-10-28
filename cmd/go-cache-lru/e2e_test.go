@@ -271,6 +271,19 @@ func TestCleanAndStatsCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "hits") {
 		t.Fatalf("stats: %v\n%s", err, out)
 	}
+	if strings.Contains(out, "objects by size") {
+		t.Fatalf("stats without -v shows the breakdown:\n%s", out)
+	}
+	out, err = e.plugin("stats", "-v")
+	if err != nil || !strings.Contains(out, "objects by size") || !strings.Contains(out, "objects by last access") {
+		t.Fatalf("stats -v: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "< 1h") {
+		t.Fatalf("stats -v: objects just built are not in the first access bucket:\n%s", out)
+	}
+	if st := e.stats(); st.Breakdown != nil {
+		t.Fatalf("stats -json without -v has a breakdown: %+v", st.Breakdown)
+	}
 	if out, err := e.plugin("clean"); err != nil {
 		t.Fatalf("clean: %v\n%s", err, out)
 	}
@@ -498,5 +511,19 @@ func TestRestartsAfterBinaryReplaced(t *testing.T) {
 	}
 	if st.Cache.Entries < old.Cache.Entries {
 		t.Fatalf("new daemon lost the cache: %d entries, had %d", st.Cache.Entries, old.Cache.Entries)
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	cmd, err := exec.Command(pluginBin, "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flag, err := exec.Command(pluginBin, "--version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cmd) == 0 || string(flag) != string(cmd) {
+		t.Fatalf("--version printed %q, version command %q", flag, cmd)
 	}
 }

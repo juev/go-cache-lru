@@ -47,7 +47,8 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
   and finish the job when the session ends.
 - **Statistics.** Hits, misses, bytes served and written, evictions, cleans,
   current size, entry and object counts, remote tier counters. Counters
-  persist across restarts.
+  persist across restarts. `stats -v` adds what occupies the cache: objects
+  by size and by time since last use.
 - **`go clean -cache` works.** See [below](#go-clean--cache).
 - **Graceful shutdown.** `SIGTERM`, `SIGINT` or `go-cache-lru stop` stop
   accepting connections, wait for running go commands (`--shutdown-timeout`,
@@ -137,12 +138,32 @@ Control commands need the same `--dir` (or `--socket`) as `GOCACHEPROG`.
 
 ```sh
 go-cache-lru --dir=$HOME/.cache/go-lru stats         # human-readable
-go-cache-lru --dir=$HOME/.cache/go-lru stats -json   # for scripts
+go-cache-lru --dir=$HOME/.cache/go-lru stats -v      # plus objects by size and last access
+go-cache-lru --dir=$HOME/.cache/go-lru stats -json   # for scripts (-json -v adds Breakdown)
 go-cache-lru --dir=$HOME/.cache/go-lru stats -reset  # zero the counters
 go-cache-lru --dir=$HOME/.cache/go-lru trim          # shrink to --target-size now
 go-cache-lru --dir=$HOME/.cache/go-lru clean         # drop everything not in use
 go-cache-lru --dir=$HOME/.cache/go-lru stop          # graceful shutdown
 go-cache-lru --dir=$HOME/.cache/go-lru serve         # run the daemon in the foreground
+go-cache-lru --version                               # version of the binary
+```
+
+`stats -v` shows where the space goes, which helps to choose the limits.
+Output for a small cache after one build:
+
+```
+objects by size
+  < 64 KiB                618     4.9 MiB    2.4%
+  64 KiB - 1 MiB          187    55.4 MiB   27.6%
+  1 MiB - 10 MiB           39   100.3 MiB   50.0%
+  10 MiB - 100 MiB          2    39.9 MiB   19.9%
+  >= 100 MiB                0         0 B    0.0%
+
+objects by last access
+  < 1h                    846   200.4 MiB  100.0%
+  1h - 6h                   0         0 B    0.0%
+  6h - 24h                  0         0 B    0.0%
+  >= 24h                    0         0 B    0.0%
 ```
 
 Upgrading the binary: `go install` the new version, or write it next to the

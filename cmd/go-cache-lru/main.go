@@ -20,10 +20,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/juev/go-cache-lru/internal/cache"
 	"github.com/juev/go-cache-lru/internal/client"
 	"github.com/juev/go-cache-lru/internal/config"
 	"github.com/juev/go-cache-lru/internal/protocol"
@@ -45,6 +47,8 @@ func run(args []string) error {
 	fs.DurationVar(&o.lockWait, "lock-wait", 0, "serve: how long to wait for a previous daemon to exit (default: shutdown timeout + 15s)")
 	fs.BoolVar(&o.json, "json", false, "stats: print JSON")
 	fs.BoolVar(&o.reset, "reset", false, "stats: reset counters")
+	fs.BoolVar(&o.verbose, "v", false, "stats: also show objects by size and by last access")
+	fs.BoolVar(&o.version, "version", false, "print the version and exit")
 
 	// Flags may come before and after the command.
 	if err := fs.Parse(args); err != nil {
@@ -52,6 +56,10 @@ func run(args []string) error {
 			return nil
 		}
 		return err
+	}
+	if o.version {
+		fmt.Println(server.Version())
+		return nil
 	}
 	cmd := fs.Arg(0)
 	if fs.NArg() > 1 {
@@ -94,8 +102,8 @@ func run(args []string) error {
 }
 
 type cmdOpts struct {
-	lockWait    time.Duration
-	json, reset bool
+	lockWait                      time.Duration
+	json, reset, verbose, version bool
 }
 
 func usage(w io.Writer, fs *flag.FlagSet) {
@@ -104,7 +112,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 commands:
   (none)   relay a go command to the daemon; use as GOCACHEPROG
   serve    run the daemon in the foreground
-  stats    show statistics (-json, -reset)
+  stats    show statistics (-json, -reset, -v)
   trim     shrink the cache to the target size now
   clean    remove all entries not in use
   stop     stop the daemon gracefully
@@ -140,11 +148,17 @@ func stats(cfg config.Config, o *cmdOpts) error {
 	}
 	defer func() { _ = conn.Close() }()
 	cmd := protocol.CmdStats
-	if o.reset {
+	switch {
+	case o.reset:
 		cmd = protocol.CmdStatsReset
+	case o.verbose:
+		cmd = protocol.CmdStatsFull
 	}
 	var st server.Status
 	if err := client.Call(conn, cmd, &st); err != nil {
+		if strings.HasPrefix(err.Error(), "unknown command") {
+			return fmt.Errorf("%w: the daemon is older than this binary and restarts with the new one on the next go command", err)
+		}
 		return err
 	}
 	if o.json {
@@ -153,6 +167,9 @@ func stats(cfg config.Config, o *cmdOpts) error {
 		return enc.Encode(st)
 	}
 	printStatus(os.Stdout, st)
+	if st.Breakdown != nil {
+		printBreakdown(os.Stdout, *st.Breakdown, st.Cache.Size)
+	}
 	return nil
 }
 
@@ -183,6 +200,54 @@ func printStatus(w io.Writer, st server.Status) {
 		p("remote", "%d hits, %d misses, %d puts, %d errors", k.RemoteHits, k.RemoteMisses, k.RemotePuts, k.RemoteErrors)
 	}
 	p("sessions", "%d", k.Sessions)
+}
+
+func printBreakdown(w io.Writer, d cache.Breakdown, total int64) {
+	row := func(label string, objects int, bytes int64) {
+		share := 0.0
+		if total > 0 {
+			share = 100 * float64(bytes) / float64(total)
+		}
+		_, _ = fmt.Fprintf(w, "  %-18s %8d %11s %6.1f%%\n", label, objects, config.FormatSize(bytes), share)
+	}
+	_, _ = fmt.Fprintln(w, "\nobjects by size")
+	for i, b := range d.BySize {
+		var lo int64
+		if i > 0 {
+			lo = d.BySize[i-1].Below
+		}
+		row(rangeLabel(i, sizeLabel(lo), sizeLabel(b.Below), b.Below == 0), b.Objects, b.Bytes)
+	}
+	_, _ = fmt.Fprintln(w, "\nobjects by last access")
+	for i, b := range d.ByAccess {
+		var lo time.Duration
+		if i > 0 {
+			lo = d.ByAccess[i-1].Below
+		}
+		row(rangeLabel(i, ageLabel(lo), ageLabel(b.Below), b.Below == 0), b.Objects, b.Bytes)
+	}
+}
+
+// rangeLabel names bucket i: "< hi" for the first, ">= lo" for the open
+// last one and "lo - hi" between.
+func rangeLabel(i int, lo, hi string, open bool) string {
+	switch {
+	case open:
+		return ">= " + lo
+	case i == 0:
+		return "< " + hi
+	default:
+		return lo + " - " + hi
+	}
+}
+
+func sizeLabel(n int64) string {
+	return strings.Replace(config.FormatSize(n), ".0 ", " ", 1)
+}
+
+// ageLabel prints whole hours as "6h" instead of "6h0m0s".
+func ageLabel(d time.Duration) string {
+	return strings.TrimSuffix(strings.TrimSuffix(d.String(), "0s"), "0m")
 }
 
 func cleanCmd(cfg config.Config, cmd protocol.Cmd) error {

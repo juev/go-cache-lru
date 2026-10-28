@@ -332,6 +332,7 @@ type Status struct {
 	Started        time.Time
 	ActiveSessions int
 	Cache          cache.Snapshot
+	Breakdown      *cache.Breakdown `json:",omitempty"` // only from x-stats-full
 }
 
 // CleanResult is returned by the clean and trim control commands.
@@ -346,6 +347,11 @@ func (s *Server) control(req *protocol.Request) *protocol.Response {
 	switch req.Command {
 	case protocol.CmdStats:
 		v = s.status()
+	case protocol.CmdStatsFull:
+		st := s.status()
+		d := s.cache.Breakdown()
+		st.Breakdown = &d
+		v = st
 	case protocol.CmdStatsReset:
 		s.cache.Counters().Reset()
 		v = s.status()

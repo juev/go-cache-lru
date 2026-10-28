@@ -32,6 +32,7 @@ const (
 const (
 	CmdStats      Cmd = "x-stats"
 	CmdStatsReset Cmd = "x-stats-reset"
+	CmdStatsFull  Cmd = "x-stats-full" // stats with the cache breakdown
 	CmdClean      Cmd = "x-clean"
 	CmdTrim       Cmd = "x-trim"
 	CmdShutdown   Cmd = "x-shutdown"
