@@ -398,7 +398,9 @@ type Status struct {
 	Started        time.Time
 	ActiveSessions int
 	Cache          cache.Snapshot
-	Breakdown      *cache.Breakdown `json:",omitempty"` // only from x-stats-full
+	Breakdown      *cache.Breakdown  `json:",omitempty"` // only from x-stats-full
+	History        []cache.HourStats // last cache.HistoryWindow, oldest first
+	Advice         cache.Advice
 }
 
 // CleanResult is returned by the clean and trim control commands.
@@ -444,13 +446,22 @@ func (s *Server) status() Status {
 	s.mu.Lock()
 	active := s.active
 	s.mu.Unlock()
-	return Status{
+	// Bring the current hour up to date before reading the history.
+	s.saveStats()
+	st := Status{
 		PID:            os.Getpid(),
 		Version:        Version(),
 		Started:        s.started,
 		ActiveSessions: active,
 		Cache:          s.cache.Snapshot(),
 	}
+	hist, err := s.cache.History()
+	if err != nil {
+		s.logf("read history: %v", err)
+	}
+	st.History = hist
+	st.Advice = cache.Advise(hist, st.Cache.MaxSize, st.Cache.TargetSize)
+	return st
 }
 
 // version is set by release builds:

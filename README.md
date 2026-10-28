@@ -49,6 +49,9 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
   current size, entry and object counts, remote tier counters. Counters
   persist across restarts. `stats -v` adds what occupies the cache: objects
   by size and by time since last use.
+- **Hourly history and size advice.** The daemon keeps the counters per hour
+  for 7 days. `stats` shows the last hour, 24 hours and 7 days and a hint
+  about `--max-size`. See [below](#hourly-history-and-size-advice).
 - **`go clean -cache` works.** See [below](#go-clean--cache).
 - **Graceful shutdown.** `SIGTERM`, `SIGINT` or `go-cache-lru stop` stop
   accepting connections, wait for running go commands (`--shutdown-timeout`,
@@ -138,8 +141,8 @@ Control commands need the same `--dir` (or `--socket`) as `GOCACHEPROG`.
 
 ```sh
 go-cache-lru --dir=$HOME/.cache/go-lru stats         # human-readable
-go-cache-lru --dir=$HOME/.cache/go-lru stats -v      # plus objects by size and last access
-go-cache-lru --dir=$HOME/.cache/go-lru stats -json   # for scripts (-json -v adds Breakdown)
+go-cache-lru --dir=$HOME/.cache/go-lru stats -v      # plus objects by size, last access, hourly table
+go-cache-lru --dir=$HOME/.cache/go-lru stats -json   # for scripts: History, Advice (-v adds Breakdown)
 go-cache-lru --dir=$HOME/.cache/go-lru stats -reset  # zero the counters
 go-cache-lru --dir=$HOME/.cache/go-lru trim          # shrink to --target-size now
 go-cache-lru --dir=$HOME/.cache/go-lru clean         # drop everything not in use
@@ -165,6 +168,39 @@ objects by last access
   6h - 24h                  0         0 B    0.0%
   >= 24h                    0         0 B    0.0%
 ```
+
+### Hourly history and size advice
+
+The cumulative counters hide how the cache behaves now: a hit rate since the
+first start includes the warm-up. The daemon also keeps the change of the
+counters per hour, with the peak size of each hour, for 7 days. It writes
+them together with `stats.json`, when go commands start and finish and every
+30 s while they run, so an idle daemon still does not wake up. `stats`
+prints three periods and the advice:
+
+```
+this hour       hit rate 60.6%, 1413 gets, 198.1 MiB written, 0 evictions
+last 24 hours   hit rate 60.6%, 1413 gets, 198.1 MiB written, 0 evictions
+last 7 days     hit rate 60.6%, 1413 gets, 198.1 MiB written, 0 evictions
+advice          not enough history yet: 1 of 24 active hours
+```
+
+`stats -v` adds a table of the last 24 hours with gets, hit rate, bytes
+written, evictions and peak size per hour.
+
+The advice is a hint, not a measurement. It looks at the last 7 days of
+hours with go commands:
+
+- with fewer than 24 such hours it waits for more data;
+- if the cache never evicted and its peak stayed under 60% of `--max-size`,
+  it suggests a limit of the peak plus 25%;
+- if the cache evicted, it compares the miss rate of the hour after each
+  eviction with the usual miss rate. When misses after at least 3 evictions
+  are 1.5 times the usual rate or more, it suggests a 50% larger limit.
+
+Code changes and branch switches cause misses too, so the advice prints the
+numbers it is based on. The suggested `--target-size` keeps its current ratio
+to `--max-size`.
 
 Upgrading the binary: `go install` the new version, or write it next to the
 old one and rename it into place. Do not overwrite the running file in place:

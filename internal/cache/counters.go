@@ -19,6 +19,7 @@ type Counters struct {
 
 	Evictions      atomic.Int64 // index entries removed by eviction
 	EvictedBytes   atomic.Int64
+	EvictionRuns   atomic.Int64 // automatic evictions that removed something
 	Cleans         atomic.Int64 // explicit clean commands
 	ExternalCleans atomic.Int64 // "go clean -cache" detected
 
@@ -40,6 +41,7 @@ type CountersSnapshot struct {
 	PutBytes       int64
 	Evictions      int64
 	EvictedBytes   int64
+	EvictionRuns   int64
 	Cleans         int64
 	ExternalCleans int64
 	RemoteHits     int64
@@ -60,6 +62,7 @@ func (c *Counters) Snapshot() CountersSnapshot {
 		PutBytes:       c.PutBytes.Load(),
 		Evictions:      c.Evictions.Load(),
 		EvictedBytes:   c.EvictedBytes.Load(),
+		EvictionRuns:   c.EvictionRuns.Load(),
 		Cleans:         c.Cleans.Load(),
 		ExternalCleans: c.ExternalCleans.Load(),
 		RemoteHits:     c.RemoteHits.Load(),
@@ -79,6 +82,7 @@ func (c *Counters) restore(s CountersSnapshot) {
 	c.PutBytes.Store(s.PutBytes)
 	c.Evictions.Store(s.Evictions)
 	c.EvictedBytes.Store(s.EvictedBytes)
+	c.EvictionRuns.Store(s.EvictionRuns)
 	c.Cleans.Store(s.Cleans)
 	c.ExternalCleans.Store(s.ExternalCleans)
 	c.RemoteHits.Store(s.RemoteHits)

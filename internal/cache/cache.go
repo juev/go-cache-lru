@@ -117,6 +117,7 @@ type Cache struct {
 	blobs    map[string]*blob
 	lru      *list.List // *entry, most recently used first
 	size     int64
+	peak     int64          // largest size since the last history record
 	trash    []string       // outputs dropped under mu, removed by unlock
 	deleting map[string]int // outputs whose files unlock has yet to remove
 	deleted  sync.Cond      // signaled when unlock has removed files
@@ -125,8 +126,9 @@ type Cache struct {
 	evictCh chan struct{}
 	stats   *Counters
 
-	saveMu sync.Mutex
-	saved  *CountersSnapshot // last written to stats.json
+	saveMu   sync.Mutex
+	saved    *CountersSnapshot // last written to stats.json
+	histBase CountersSnapshot  // counters already added to the hourly history
 }
 
 // Open opens or creates the cache in opts.Dir and loads its index.
@@ -169,6 +171,7 @@ func Open(opts Options) (*Cache, error) {
 	}
 	c.removeStaleTemps()
 	c.stats = loadCounters(c.statsPath())
+	c.histBase = c.stats.Snapshot()
 	if c.idx, err = openIndex(filepath.Join(c.stateDir, "index.db"), c.logf); err != nil {
 		return nil, err
 	}
@@ -178,6 +181,7 @@ func Open(opts Options) (*Cache, error) {
 		_ = c.idx.close()
 		return nil, err
 	}
+	c.peak = c.size
 	return c, nil
 }
 
@@ -401,6 +405,7 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 			c.blobs[output] = b
 		}
 		c.size += usage(size)
+		c.peak = max(c.peak, c.size)
 		l.pinLocked(b)
 	}
 	c.idx.upsert(action, output, size, now)
@@ -581,6 +586,9 @@ func (c *Cache) evictIfNeeded() {
 	n, bytes := c.Evict(c.opts.TargetSize)
 	c.stats.Evictions.Add(int64(n))
 	c.stats.EvictedBytes.Add(bytes)
+	if n > 0 {
+		c.stats.EvictionRuns.Add(1)
+	}
 	c.logf("evicted %d entries (%d bytes) in %v, size now %d", n, bytes, c.now().Sub(start).Round(time.Millisecond), c.Size())
 }
 
@@ -639,8 +647,11 @@ func (c *Cache) Snapshot() Snapshot {
 	return s
 }
 
-// SaveStats persists the cumulative counters. It skips the write when
-// nothing changed since the last save.
+// SaveStats persists the cumulative counters and adds their change to the
+// hourly history. It skips both when nothing changed since the last save.
+// The server calls it when go command sessions start and end and every
+// 30 s while they run, so the history is accurate to about that much
+// around hour boundaries.
 func (c *Cache) SaveStats() error {
 	c.saveMu.Lock()
 	defer c.saveMu.Unlock()
@@ -652,5 +663,5 @@ func (c *Cache) SaveStats() error {
 		return err
 	}
 	c.saved = &snap
-	return nil
+	return c.recordHistory(snap)
 }

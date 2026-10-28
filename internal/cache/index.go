@@ -24,6 +24,20 @@ CREATE TABLE IF NOT EXISTS entries (
 	put_time INTEGER NOT NULL, -- unix nanos
 	atime    INTEGER NOT NULL  -- unix nanos, last access (LRU key)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS hourly (
+	hour          INTEGER PRIMARY KEY, -- unix seconds of the hour's start, UTC
+	hits          INTEGER NOT NULL DEFAULT 0,
+	misses        INTEGER NOT NULL DEFAULT 0,
+	hit_bytes     INTEGER NOT NULL DEFAULT 0,
+	puts          INTEGER NOT NULL DEFAULT 0,
+	put_bytes     INTEGER NOT NULL DEFAULT 0,
+	evictions     INTEGER NOT NULL DEFAULT 0,
+	evicted_bytes INTEGER NOT NULL DEFAULT 0,
+	eviction_runs INTEGER NOT NULL DEFAULT 0,
+	sessions      INTEGER NOT NULL DEFAULT 0,
+	peak_size     INTEGER NOT NULL DEFAULT 0
+);
 `
 
 type opKind int
@@ -235,4 +249,58 @@ func (x *index) close() error {
 		}
 	})
 	return x.closeErr
+}
+
+// addHour adds d to the row of hour and drops rows older than expire. It
+// writes directly rather than through the queue: it runs at most every
+// few seconds, off the get and put path.
+func (x *index) addHour(hour time.Time, d HourStats, expire time.Time) error {
+	tx, err := x.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO hourly (hour, hits, misses, hit_bytes, puts, put_bytes,
+			evictions, evicted_bytes, eviction_runs, sessions, peak_size)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (hour) DO UPDATE SET
+			hits = hits + excluded.hits, misses = misses + excluded.misses,
+			hit_bytes = hit_bytes + excluded.hit_bytes, puts = puts + excluded.puts,
+			put_bytes = put_bytes + excluded.put_bytes, evictions = evictions + excluded.evictions,
+			evicted_bytes = evicted_bytes + excluded.evicted_bytes,
+			eviction_runs = eviction_runs + excluded.eviction_runs,
+			sessions = sessions + excluded.sessions,
+			peak_size = max(peak_size, excluded.peak_size)`,
+		hour.Unix(), d.Hits, d.Misses, d.HitBytes, d.Puts, d.PutBytes,
+		d.Evictions, d.EvictedBytes, d.EvictionRuns, d.Sessions, d.PeakSize); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM hourly WHERE hour < ?`, expire.Truncate(time.Hour).Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// loadHours returns the rows of hours starting at or after since, oldest
+// first.
+func (x *index) loadHours(since time.Time) ([]HourStats, error) {
+	rows, err := x.db.Query(`SELECT hour, hits, misses, hit_bytes, puts, put_bytes, evictions,
+		evicted_bytes, eviction_runs, sessions, peak_size FROM hourly WHERE hour >= ? ORDER BY hour`,
+		since.Truncate(time.Hour).Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var res []HourStats
+	for rows.Next() {
+		var h HourStats
+		var hour int64
+		if err := rows.Scan(&hour, &h.Hits, &h.Misses, &h.HitBytes, &h.Puts, &h.PutBytes, &h.Evictions,
+			&h.EvictedBytes, &h.EvictionRuns, &h.Sessions, &h.PeakSize); err != nil {
+			return nil, err
+		}
+		h.Hour = time.Unix(hour, 0)
+		res = append(res, h)
+	}
+	return res, rows.Err()
 }
