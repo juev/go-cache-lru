@@ -139,6 +139,57 @@ func (c Config) Args() []string {
 	return args
 }
 
+// ProgArgs returns the arguments that the go command's GOCACHEPROG passes
+// to go-cache-lru, so that a control command run by hand finds the daemon
+// the go commands use. It reads GOCACHEPROG from the environment, then from
+// "go env", and returns nil unless it runs a binary named like self.
+func ProgArgs(self string) []string {
+	prog := os.Getenv("GOCACHEPROG")
+	if prog == "" {
+		out, err := exec.Command("go", "env", "GOCACHEPROG").Output()
+		if err != nil {
+			return nil
+		}
+		prog = strings.TrimSpace(string(out))
+	}
+	return progArgs(prog, self)
+}
+
+func progArgs(prog, self string) []string {
+	fields, err := splitQuoted(prog)
+	if err != nil || len(fields) == 0 || filepath.Base(fields[0]) != filepath.Base(self) {
+		return nil
+	}
+	return fields[1:]
+}
+
+// splitQuoted splits s into fields the way the go command splits
+// GOCACHEPROG: on white space, with single- or double-quoted fields.
+func splitQuoted(s string) ([]string, error) {
+	var fields []string
+	for {
+		s = strings.TrimLeft(s, " \t\n\r")
+		if s == "" {
+			return fields, nil
+		}
+		if q := s[0]; q == '"' || q == '\'' {
+			end := strings.IndexByte(s[1:], q)
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated %c string", q)
+			}
+			fields = append(fields, s[1:1+end])
+			s = s[2+end:]
+			continue
+		}
+		end := strings.IndexAny(s, " \t\n\r")
+		if end < 0 {
+			end = len(s)
+		}
+		fields = append(fields, s[:end])
+		s = s[end:]
+	}
+}
+
 func envOr(name, def string) string {
 	if v := os.Getenv(name); v != "" {
 		return v

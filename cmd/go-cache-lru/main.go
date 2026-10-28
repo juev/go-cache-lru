@@ -77,6 +77,10 @@ func run(args []string) error {
 	case "help":
 		usage(os.Stdout, fs)
 		return nil
+	case "stats", "trim", "clean", "stop":
+		if err := adoptGoCacheProg(fs); err != nil {
+			return err
+		}
 	}
 	cfg, err := flags.Resolve()
 	if err != nil {
@@ -99,6 +103,41 @@ func run(args []string) error {
 		usage(os.Stderr, fs)
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// adoptGoCacheProg lets a control command find the daemon that go commands
+// use. Without --dir or --socket on the command line or in the environment,
+// the flags that GOCACHEPROG passes to go-cache-lru fill in those not given
+// on the command line.
+func adoptGoCacheProg(fs *flag.FlagSet) error {
+	set := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if set["dir"] || set["socket"] || os.Getenv(config.EnvDir) != "" || os.Getenv(config.EnvSocket) != "" {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	args := config.ProgArgs(self)
+	if len(args) == 0 {
+		return nil
+	}
+	pfs := flag.NewFlagSet("GOCACHEPROG", flag.ContinueOnError)
+	pfs.SetOutput(io.Discard)
+	config.Register(pfs)
+	if err := pfs.Parse(args); err != nil {
+		return fmt.Errorf("GOCACHEPROG: %w", err)
+	}
+	pfs.Visit(func(f *flag.Flag) {
+		if !set[f.Name] {
+			err = errors.Join(err, fs.Set(f.Name, f.Value.String()))
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("GOCACHEPROG: %w", err)
+	}
+	return nil
 }
 
 type cmdOpts struct {
