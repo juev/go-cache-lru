@@ -299,6 +299,7 @@ type session struct {
 }
 
 func (s *Server) handle(conn net.Conn) {
+	protocol.SetBuffers(conn)
 	ss := &session{s: s, w: protocol.NewWriter(conn), lease: s.cache.NewLease()}
 	defer func() {
 		// Answers to outstanding requests may still reference pinned

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 )
@@ -376,4 +377,19 @@ func (r *ResponseReader) Next() (*Response, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+// socketBuffer is the send and receive buffer size for connections
+// between the bridge and the daemon. macOS defaults unix stream sockets to
+// 8 KiB (net.local.stream.sendspace), which splits put bodies into many
+// small reads and writes on both ends.
+const socketBuffer = 1 << 20
+
+// SetBuffers enlarges the kernel buffers of a unix socket connection.
+// Errors are ignored: the defaults still work, only slower.
+func SetBuffers(conn net.Conn) {
+	if uc, ok := conn.(*net.UnixConn); ok {
+		_ = uc.SetReadBuffer(socketBuffer)
+		_ = uc.SetWriteBuffer(socketBuffer)
+	}
 }
