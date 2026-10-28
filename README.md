@@ -66,7 +66,7 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
 
 ## Install
 
-Prebuilt binaries for macOS and Linux (amd64, arm64) are on the
+Prebuilt binaries for macOS, Linux and Windows (amd64, arm64) are on the
 [releases page](https://github.com/juev/go-cache-lru/releases). Or build from
 source:
 
@@ -76,8 +76,9 @@ go install github.com/juev/go-cache-lru/cmd/go-cache-lru@latest
 
 Building from source needs Go 1.26 or newer (required by the SQLite
 driver). The go command that uses the cache needs 1.24 or newer: GOCACHEPROG
-is available without `GOEXPERIMENT` since 1.24. Windows is not supported
-yet.
+is available without `GOEXPERIMENT` since 1.24. On Windows the daemon
+listens on a unix socket, which Windows supports since Windows 10 version
+1803.
 
 ## Use
 
@@ -109,7 +110,20 @@ mix with go-cache-lru's files. Remove those leftovers once with
 `go clean -cache` before switching.
 
 Tools started outside the shell (an IDE launched from the Dock) do not see
-the variable and keep using the go command's own cache.
+the variable and keep using the go command's own cache. `go env -w` stores
+the setting where every go command finds it, whatever started it:
+
+```sh
+go env -w GOCACHEPROG="$HOME/go/bin/go-cache-lru --dir=$HOME/.cache/go-lru --max-size=30GiB --target-size=25GiB"
+```
+
+A variable in the environment still wins over `go env -w`.
+
+Windows (PowerShell). Put a path with spaces in quotes inside the value:
+
+```powershell
+go env -w GOCACHEPROG="'$env:USERPROFILE\go\bin\go-cache-lru.exe' --dir='$env:LOCALAPPDATA\go-lru' --max-size=30GiB --target-size=25GiB"
+```
 
 ### Flags
 
@@ -263,6 +277,11 @@ daemon cannot open the cache until the old one has drained. If go commands
 keep running for `--shutdown-timeout`, the old daemon stops accepting and
 drains as on `stop`. `go-cache-lru stop` switches at once.
 
+Windows does not let a running `.exe` be replaced, but lets it be renamed.
+Rename `go-cache-lru.exe` to, for example, `go-cache-lru.exe.old`, put the
+new binary in its place, and delete the old file once the old daemon has
+exited.
+
 ### go clean -cache
 
 `go clean -cache` does not start GOCACHEPROG. It deletes the two-hex-digit
@@ -288,6 +307,9 @@ queue is full, it skips the object and counts a remote error.
 ```sh
 # directory, e.g. a network share
 --remote=file:///Volumes/share/go-cache
+
+# directory on Windows
+--remote=file:///D:/share/go-cache
 
 # AWS S3
 --remote='s3://my-bucket/go-cache?region=eu-central-1'
@@ -320,9 +342,9 @@ go vet   ──stdin/stdout──▶ go-cache-lru ──unix socket──┘    
 Each go command starts `go-cache-lru` as its GOCACHEPROG. That process only
 relays bytes between the go command and a daemon session. The daemon:
 
-- owns the directory through an exclusive `flock` on
-  `<dir>/gocacheprog/daemon.lock`; the lock dies with the process, so a
-  crash never blocks the next start;
+- owns the directory through an exclusive lock (`flock`, `LockFileEx` on
+  Windows) on `<dir>/gocacheprog/daemon.lock`; the lock dies with the
+  process, so a crash never blocks the next start;
 - stores an object once per output ID (`xx/<output>-pd`), so identical
   outputs of different actions share one file; the suffix differs from the
   go command's own `-a`/`-d` files, so its age-based trimming never touches
