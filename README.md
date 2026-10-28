@@ -57,9 +57,9 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
   accepting connections, wait for running go commands (`--shutdown-timeout`,
   1 minute by default), flush queued uploads and save statistics. Ctrl-C on a
   build does not reach the daemon: it runs in its own session.
-- **Picks up upgrades.** A daemon whose binary was replaced on disk exits
-  gracefully after serving the go command that noticed it, so the next one
-  runs the new version.
+- **Picks up upgrades.** A daemon whose binary was replaced on disk keeps
+  serving and exits at the first moment no go command is connected, so the
+  next one runs the new version and no go command waits for the switch.
 - **Pluggable remote storage.** Optional second tier behind the local disk:
   `file://` for a directory such as a network share, `s3://` for AWS S3,
   Cloudflare R2, MinIO and other S3-compatible services.
@@ -124,7 +124,7 @@ variable.
 | `--remote` | `GOCACHELRU_REMOTE` | none | remote storage URL |
 | `--socket` | `GOCACHELRU_SOCKET` | `<dir>/gocacheprog/daemon.sock` | daemon socket |
 | `--idle-timeout` | `GOCACHELRU_IDLE_TIMEOUT` | `0` (never) | daemon exits after this long without go commands |
-| `--shutdown-timeout` | `GOCACHELRU_SHUTDOWN_TIMEOUT` | `1m` | how long shutdown waits for running go commands |
+| `--shutdown-timeout` | `GOCACHELRU_SHUTDOWN_TIMEOUT` | `1m` | how long shutdown waits for running go commands; after an upgrade, also how long the old daemon waits for a moment without them |
 
 Sizes accept `K`, `M`, `G`, `T` and `KiB`…`TiB` (binary) or `KB`…`TB`
 (decimal). The size counts file system blocks (4 KiB), so it is close to
@@ -204,10 +204,14 @@ to `--max-size`.
 
 Upgrading the binary: `go install` the new version, or write it next to the
 old one and rename it into place. Do not overwrite the running file in place:
-macOS may kill a process whose binary changed under it. The daemon checks its binary whenever a go command or a control command
-connects. The first connection after the upgrade is still served by the old
-daemon, which then exits once its running go commands finish. The next go
-command starts the new binary. `go-cache-lru stop` switches at once.
+macOS may kill a process whose binary changed under it. The daemon checks its
+binary whenever a go command or a control command connects. After it notices
+the new binary, the old daemon keeps accepting go commands and exits as soon
+as none is connected; the next go command starts the new binary. Shutting
+down at once would make every go command started meanwhile wait: the new
+daemon cannot open the cache until the old one has drained. If go commands
+keep running for `--shutdown-timeout`, the old daemon stops accepting and
+drains as on `stop`. `go-cache-lru stop` switches at once.
 
 ### go clean -cache
 

@@ -454,10 +454,12 @@ func TestGoCommandDuringDrain(t *testing.T) {
 	}
 }
 
-// TestRestartsAfterBinaryReplaced installs a new binary under the path in
-// GOCACHEPROG while the daemon runs. The go command that notices it must
-// still succeed, and the next one must be served by the new binary.
-func TestRestartsAfterBinaryReplaced(t *testing.T) {
+// replacedVersion is the version of the binary that replaces the daemon's.
+const replacedVersion = "replaced-in-test"
+
+// copyPlugin returns a copy of the plugin binary that a test may replace.
+func copyPlugin(t *testing.T) string {
+	t.Helper()
 	bin := filepath.Join(t.TempDir(), "go-cache-lru")
 	data, err := os.ReadFile(pluginBin)
 	if err != nil {
@@ -466,6 +468,94 @@ func TestRestartsAfterBinaryReplaced(t *testing.T) {
 	if err := os.WriteFile(bin, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return bin
+}
+
+// replaceBinary builds a binary reporting replacedVersion next to bin and
+// renames it into place, the way go install does.
+func replaceBinary(t *testing.T, bin string) {
+	t.Helper()
+	out, err := exec.Command("go", "build", "-o", bin+".new",
+		"-ldflags", "-X github.com/juev/go-cache-lru/internal/server.version="+replacedVersion, ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("build replacement: %v\n%s", err, out)
+	}
+	if err := os.Rename(bin+".new", bin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitExit waits up to d for the daemon with pid to stop answering.
+func (e *env) waitExit(pid int, d time.Duration) {
+	e.t.Helper()
+	deadline := time.Now().Add(d)
+	for e.statsOrZero().PID == pid {
+		if time.Now().After(deadline) {
+			e.t.Fatalf("old daemon still running %v after its binary was replaced", d)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitActive waits for a go command session and returns the daemon status.
+func (e *env) waitActive() server.Status {
+	e.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if st := e.statsOrZero(); st.ActiveSessions > 0 {
+			return st
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatal("session never became active")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// startSlowTest starts a go test in mod that keeps its session open for d.
+func (e *env) startSlowTest(mod string, d time.Duration) <-chan error {
+	e.t.Helper()
+	slow := filepath.Join(mod, "slow", "slow_test.go")
+	if err := os.MkdirAll(filepath.Dir(slow), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	body := fmt.Sprintf("package slow\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(%d) }\n", d)
+	if err := os.WriteFile(slow, []byte(body), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		out, err := e.run(mod, "go", "test", "-count=1", "./slow")
+		if err != nil {
+			err = fmt.Errorf("%v\n%s", err, out)
+		}
+		done <- err
+	}()
+	return done
+}
+
+// checkReplaced builds mod and checks that a new daemon running the
+// replacement served it.
+func (e *env) checkReplaced(mod string, old server.Status) {
+	e.t.Helper()
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		e.t.Fatalf("build after restart: %v\n%s", err, out)
+	}
+	st := e.stats()
+	if st.Version != replacedVersion || st.PID == old.PID {
+		e.t.Fatalf("daemon after restart: pid %d version %q, want a new pid with version %q (old pid %d)",
+			st.PID, st.Version, replacedVersion, old.PID)
+	}
+	if st.Cache.Entries < old.Cache.Entries {
+		e.t.Fatalf("new daemon lost the cache: %d entries, had %d", st.Cache.Entries, old.Cache.Entries)
+	}
+}
+
+// TestRestartsAfterBinaryReplaced installs a new binary under the path in
+// GOCACHEPROG while the daemon runs. The go command that notices it must
+// still succeed, and the next one must be served by the new binary.
+func TestRestartsAfterBinaryReplaced(t *testing.T) {
+	bin := copyPlugin(t)
 	e := newEnv(t, "GOCACHEPROG="+bin)
 	mod := writeModule(t, "")
 	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
@@ -473,40 +563,78 @@ func TestRestartsAfterBinaryReplaced(t *testing.T) {
 	}
 	old := e.stats()
 
-	// Build the replacement next to it and rename it into place, the way
-	// go install does.
-	const version = "replaced-in-test"
-	out, err := exec.Command("go", "build", "-o", bin+".new",
-		"-ldflags", "-X github.com/juev/go-cache-lru/internal/server.version="+version, ".").CombinedOutput()
-	if err != nil {
-		t.Fatalf("build replacement: %v\n%s", err, out)
-	}
-	if err := os.Rename(bin+".new", bin); err != nil {
-		t.Fatal(err)
-	}
-
+	replaceBinary(t, bin)
 	if out, err := e.run(writeModule(t, "x"), "go", "build", "./..."); err != nil {
 		t.Fatalf("build that notices the new binary: %v\n%s", err, out)
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for e.statsOrZero().PID == old.PID {
-		if time.Now().After(deadline) {
-			t.Fatal("old daemon still running after its binary was replaced")
+	e.waitExit(old.PID, 30*time.Second)
+	e.checkReplaced(mod, old)
+}
+
+// TestUpgradeDuringLongSession replaces the binary while a long go test
+// runs. The old daemon keeps serving, so go commands started meanwhile do
+// not wait for it to drain, and it exits as soon as the go test ends.
+func TestUpgradeDuringLongSession(t *testing.T) {
+	bin := copyPlugin(t)
+	// A drain would outlast the test: only an exit at the first moment
+	// without go commands lets the new binary in.
+	e := newEnv(t, "GOCACHEPROG="+bin, "GOCACHELRU_SHUTDOWN_TIMEOUT=5m")
+	mod := writeModule(t, "")
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("first build: %v\n%s", err, out)
+	}
+	slowDone := e.startSlowTest(mod, 15*time.Second)
+	old := e.waitActive()
+
+	replaceBinary(t, bin)
+	// The first build notices the new binary; the second would wait for
+	// the drain if the old daemon had stopped accepting.
+	for _, variant := range []string{"x", "y"} {
+		if out, err := e.run(writeModule(t, variant), "go", "build", "./..."); err != nil {
+			t.Fatalf("build %s during the long session: %v\n%s", variant, err, out)
 		}
-		time.Sleep(50 * time.Millisecond)
+	}
+	select {
+	case <-slowDone:
+		t.Fatal("go commands started after the upgrade waited for the long session")
+	default:
+	}
+	if st := e.stats(); st.PID != old.PID {
+		t.Fatalf("daemon restarted under an active session: pid %d, was %d", st.PID, old.PID)
 	}
 
+	if err := <-slowDone; err != nil {
+		t.Fatalf("slow test: %v", err)
+	}
+	e.waitExit(old.PID, 10*time.Second)
+	e.checkReplaced(mod, old)
+}
+
+// TestUpgradeUnderConstantLoad replaces the binary while a session stays
+// open longer than the shutdown timeout. The daemon must not wait for a
+// moment without go commands forever: after the timeout it drains as on
+// stop, and the next go command runs the new binary.
+func TestUpgradeUnderConstantLoad(t *testing.T) {
+	bin := copyPlugin(t)
+	e := newEnv(t, "GOCACHEPROG="+bin, "GOCACHELRU_SHUTDOWN_TIMEOUT=2s")
+	mod := writeModule(t, "")
 	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
-		t.Fatalf("build after restart: %v\n%s", err, out)
+		t.Fatalf("first build: %v\n%s", err, out)
 	}
-	st := e.stats()
-	if st.Version != version || st.PID == old.PID {
-		t.Fatalf("daemon after restart: pid %d version %q, want a new pid with version %q (old pid %d)",
-			st.PID, st.Version, version, old.PID)
+	slowDone := e.startSlowTest(mod, 20*time.Second)
+	old := e.waitActive()
+
+	replaceBinary(t, bin)
+	if out, err := e.run(writeModule(t, "x"), "go", "build", "./..."); err != nil {
+		t.Fatalf("build that notices the new binary: %v\n%s", err, out)
 	}
-	if st.Cache.Entries < old.Cache.Entries {
-		t.Fatalf("new daemon lost the cache: %d entries, had %d", st.Cache.Entries, old.Cache.Entries)
-	}
+	// The upgrade deadline and the drain take 2s each; the slow test runs
+	// much longer.
+	e.waitExit(old.PID, 12*time.Second)
+	e.checkReplaced(mod, old)
+	// The drain closed the slow test's session, so its result is not
+	// checked; wait for it only to let go of the module directory.
+	<-slowDone
 }
 
 func TestVersionFlag(t *testing.T) {

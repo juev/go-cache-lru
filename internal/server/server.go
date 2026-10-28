@@ -36,11 +36,14 @@ type Options struct {
 	// IdleTimeout stops the server after this long without sessions; 0
 	// disables it.
 	IdleTimeout time.Duration
-	// DrainTimeout bounds how long shutdown waits for active sessions.
+	// DrainTimeout bounds how long shutdown waits for active sessions. It
+	// also bounds how long an upgrade waits for a moment without them.
 	DrainTimeout time.Duration
 	// Executable is the daemon binary. When a new connection finds it
-	// replaced, the server serves that connection and shuts down, so the
-	// next go command starts the new binary. Empty disables the check.
+	// replaced, the server keeps serving and exits as soon as no
+	// connection is open, so the next go command starts the new binary.
+	// If that moment does not come within DrainTimeout, it shuts down as
+	// on Shutdown. Empty disables the check.
 	Executable string
 	Logf       func(format string, args ...any)
 }
@@ -57,12 +60,14 @@ type Server struct {
 	shutdown     chan struct{} // closed to request shutdown
 	shutdownOnce sync.Once
 	activity     chan struct{} // a go command session started or ended
+	upgrade      chan struct{} // closed when the binary is found replaced
 
-	mu       sync.Mutex
-	conns    map[net.Conn]struct{}
-	active   int // go command sessions
-	idleFrom time.Time
-	sessions sync.WaitGroup
+	mu        sync.Mutex
+	conns     map[net.Conn]struct{}
+	active    int // go command sessions
+	idleFrom  time.Time
+	sessions  sync.WaitGroup
+	upgrading bool // exit when the last connection ends
 }
 
 // New returns a server.
@@ -78,6 +83,7 @@ func New(opts Options) *Server {
 		started:  time.Now(),
 		shutdown: make(chan struct{}),
 		activity: make(chan struct{}, 1),
+		upgrade:  make(chan struct{}),
 		conns:    make(map[net.Conn]struct{}),
 		idleFrom: time.Now(),
 	}
@@ -96,7 +102,39 @@ func (s *Server) Shutdown() {
 	// starts waiting or sees the shutdown and refuses it.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.shutdownLocked()
+}
+
+func (s *Server) shutdownLocked() {
 	s.shutdownOnce.Do(func() { close(s.shutdown) })
+}
+
+// startUpgrade makes the server exit when its last connection ends. Exiting
+// right away would make every go command started during the drain wait for
+// it: the new daemon cannot open the directory until the old one is gone.
+func (s *Server) startUpgrade() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logf("%s was replaced, exiting when no go command is running (at most in %v)", s.exe.path, s.opts.DrainTimeout)
+	s.upgrading = true
+	close(s.upgrade)
+	// The connection that noticed may have ended already.
+	s.exitIfUnused()
+}
+
+// exitIfUnused shuts down a server waiting to upgrade once no connection is
+// open. It runs under s.mu, so track cannot add a session in between.
+func (s *Server) exitIfUnused() {
+	if !s.upgrading || len(s.conns) > 0 {
+		return
+	}
+	select {
+	case <-s.shutdown:
+		return // already draining
+	default:
+	}
+	s.logf("no go command is running, exiting for the new binary")
+	s.shutdownLocked()
 }
 
 // Serve accepts sessions on ln until ctx is done, Shutdown is called or
@@ -113,6 +151,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 	acceptErr := make(chan error, 1)
 	go func() {
+		noticed := false
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -126,9 +165,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			go s.handle(conn)
 			// Checked per connection rather than on a timer, so an idle
 			// daemon does not wake up for it.
-			if s.exe.replaced() {
-				s.logf("%s was replaced, exiting after active sessions", s.exe.path)
-				s.Shutdown()
+			if !noticed && s.exe.replaced() {
+				noticed = true
+				s.startUpgrade()
 			}
 		}
 	}()
@@ -154,6 +193,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		defer t.Stop()
 		idleTick = t.C
 	}
+
+	// An upgrade that finds no moment without go commands falls back to a
+	// shutdown, so constant load does not keep the old binary forever.
+	upgrade := s.upgrade
+	var upgradeDeadline <-chan time.Time
 
 	var err error
 loop:
@@ -190,6 +234,14 @@ loop:
 				s.logf("idle for %v, exiting", s.opts.IdleTimeout)
 				break loop
 			}
+		case <-upgrade:
+			upgrade = nil
+			t := time.NewTimer(s.opts.DrainTimeout)
+			defer t.Stop()
+			upgradeDeadline = t.C
+		case <-upgradeDeadline:
+			s.logf("go commands kept running for %v, exiting after active sessions", s.opts.DrainTimeout)
+			break loop
 		}
 	}
 
@@ -270,6 +322,7 @@ func (s *Server) untrack(conn net.Conn, wasSession bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.conns, conn)
+	s.exitIfUnused()
 	if wasSession {
 		s.active--
 		if s.active == 0 {
