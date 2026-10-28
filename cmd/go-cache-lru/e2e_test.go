@@ -378,6 +378,39 @@ func TestFlagsSeparateDir(t *testing.T) {
 	}
 }
 
+// TestControlCommandsUseGoCacheProg runs control commands without --dir:
+// they must find the daemon through the flags in GOCACHEPROG, whether it
+// is set in the environment or with go env -w.
+func TestControlCommandsUseGoCacheProg(t *testing.T) {
+	dir := t.TempDir()
+	prog := pluginBin + " --dir=" + dir
+	e := newEnv(t, "GOCACHEPROG="+prog)
+	mod := writeModule(t, "")
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	if st := e.stats(); st.Cache.Dir != dir || st.Cache.Entries == 0 {
+		t.Fatalf("stats without --dir: dir %q, %d entries; want %q with entries", st.Cache.Dir, st.Cache.Entries, dir)
+	}
+
+	// An explicit --dir still wins.
+	other := t.TempDir()
+	if out, err := e.plugin("--dir="+other, "stats"); err == nil || !strings.Contains(out, "not running") {
+		t.Fatalf("stats --dir=%s reached the daemon in %s: %v\n%s", other, dir, err, out)
+	}
+
+	// GOCACHEPROG written with go env -w instead of the environment.
+	goenv := filepath.Join(t.TempDir(), "go.env")
+	e.vars = append(e.vars, "GOENV="+goenv)
+	if out, err := e.run("", "go", "env", "-w", "GOCACHEPROG="+prog); err != nil {
+		t.Fatalf("go env -w: %v\n%s", err, out)
+	}
+	e.vars = append(e.vars, "GOCACHEPROG=")
+	if st := e.stats(); st.Cache.Dir != dir {
+		t.Fatalf("stats with GOCACHEPROG from go env: dir %q, want %q", st.Cache.Dir, dir)
+	}
+}
+
 // TestRemoteTier builds on one machine and reads the results on another
 // through shared remote storage.
 func TestRemoteTier(t *testing.T) {

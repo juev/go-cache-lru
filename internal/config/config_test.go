@@ -88,3 +88,24 @@ func TestRejectsTargetAboveMax(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func TestProgArgs(t *testing.T) {
+	const self = "/usr/local/bin/go-cache-lru"
+	for _, tc := range []struct {
+		prog string
+		want []string
+	}{
+		{"go-cache-lru", []string{}},
+		{"/home/me/go/bin/go-cache-lru --dir=/tmp/c --max-size=1GiB", []string{"--dir=/tmp/c", "--max-size=1GiB"}},
+		{`  "/my bin/go-cache-lru"  --dir '/a b'  `, []string{"--dir", "/a b"}},
+		{"/usr/bin/other-prog --dir=/tmp/c", nil},
+		{`go-cache-lru "--dir=/unterminated`, nil},
+		{`go-cache-lru --dir="/a"`, []string{`--dir="/a"`}},
+		{"", nil},
+	} {
+		got := progArgs(tc.prog, self)
+		if (got == nil) != (tc.want == nil) || strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("progArgs(%q) = %q, want %q", tc.prog, got, tc.want)
+		}
+	}
+}

@@ -25,7 +25,7 @@ limit.
 go install github.com/juev/go-cache-lru/cmd/go-cache-lru@latest
 export GOCACHEPROG="$(go env GOPATH)/bin/go-cache-lru --dir=$HOME/.cache/go-lru --max-size=30GiB --target-size=25GiB"
 go build ./...                                  # starts the daemon on first use
-go-cache-lru --dir=$HOME/.cache/go-lru stats    # hits, misses, size, evictions
+go-cache-lru stats                              # hits, misses, size, evictions
 ```
 
 See [Use](#use) for fish, prebuilt binaries and all flags.
@@ -137,16 +137,20 @@ the new values.
 
 ### Commands
 
-Control commands need the same `--dir` (or `--socket`) as `GOCACHEPROG`.
+Control commands talk to the daemon that the go commands use. Without
+`--dir` or `--socket` on the command line or in `GOCACHELRU_DIR` /
+`GOCACHELRU_SOCKET`, `stats`, `trim`, `clean` and `stop` take the flags from
+`GOCACHEPROG` (the environment, or `go env -w`) when it runs go-cache-lru.
+Flags given on the command line win.
 
 ```sh
-go-cache-lru --dir=$HOME/.cache/go-lru stats         # human-readable
-go-cache-lru --dir=$HOME/.cache/go-lru stats -v      # plus objects by size, last access, hourly table
-go-cache-lru --dir=$HOME/.cache/go-lru stats -json   # for scripts: History, Advice (-v adds Breakdown)
-go-cache-lru --dir=$HOME/.cache/go-lru stats -reset  # zero the counters
-go-cache-lru --dir=$HOME/.cache/go-lru trim          # shrink to --target-size now
-go-cache-lru --dir=$HOME/.cache/go-lru clean         # drop everything not in use
-go-cache-lru --dir=$HOME/.cache/go-lru stop          # graceful shutdown
+go-cache-lru stats                                   # human-readable
+go-cache-lru stats -v                                # plus objects by size, last access, hourly table
+go-cache-lru stats -json                             # for scripts: History, Advice (-v adds Breakdown)
+go-cache-lru stats -reset                            # zero the counters
+go-cache-lru trim                                    # shrink to --target-size now
+go-cache-lru clean                                   # drop everything not in use
+go-cache-lru stop                                    # graceful shutdown
 go-cache-lru --dir=$HOME/.cache/go-lru serve         # run the daemon in the foreground
 go-cache-lru --version                               # version of the binary
 ```
