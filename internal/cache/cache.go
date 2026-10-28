@@ -47,7 +47,8 @@ const (
 	// blockSize approximates file system allocation for size accounting.
 	blockSize = 4096
 
-	// writeBuffer batches writes of an object body to its temp file.
+	// writeBuffer batches writes of an object body to its temp file. Smaller
+	// bodies get a buffer of their own size.
 	writeBuffer = 256 << 10
 
 	// touchInterval limits how often an access is written to the index.
@@ -443,7 +444,7 @@ func (c *Cache) writeTemp(outputID []byte, size int64, body io.Reader) (string, 
 	h := sha256.New()
 	// The protocol body decodes in pieces of at most 768 bytes; unbuffered,
 	// each one would be its own write system call.
-	w := bufio.NewWriterSize(f, writeBuffer)
+	w := bufio.NewWriterSize(f, int(min(size, writeBuffer)))
 	n, err := io.Copy(io.MultiWriter(w, h), body)
 	if err == nil {
 		err = w.Flush()
