@@ -70,16 +70,20 @@ func newEnv(t *testing.T, extra ...string) *env {
 	)
 	e.vars = append(e.vars, extra...)
 	t.Cleanup(func() {
-		// Stop the daemon and wait for it to release the directory.
-		_, _ = e.plugin("stop")
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, err := e.plugin("stats"); err != nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
+		// Stop the daemon and wait for it to exit: it holds its lock until
+		// then, and Windows cannot remove the binary or the index of a
+		// running daemon.
+		st := e.statsOrZero()
+		if st.PID == 0 {
+			return
 		}
-		t.Error("daemon did not stop")
+		_, _ = e.plugin("stop")
+		lock, err := server.LockFile(filepath.Join(st.Cache.Dir, cache.StateDirName, "daemon.lock"), 10*time.Second)
+		if err != nil {
+			t.Errorf("daemon did not stop: %v", err)
+			return
+		}
+		_ = lock.Close()
 	})
 	return e
 }

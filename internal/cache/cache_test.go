@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -447,6 +448,8 @@ func TestSeparateDirWatchesGoCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows cannot remove the temp dir while the index is open.
+	t.Cleanup(func() { _ = c.Close() })
 	l := c.NewLease()
 	held := put(t, c, l, action(1), []byte("in use"))
 	other := c.NewLease()
@@ -540,7 +543,11 @@ func TestReopenAfterUnflushedChanges(t *testing.T) {
 }
 
 func TestIndexPathWithURISyntax(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "a?b#c%41")
+	name := "a?b#c%41"
+	if runtime.GOOS == "windows" {
+		name = "a#b%41" // "?" is not allowed in Windows file names
+	}
+	dir := filepath.Join(t.TempDir(), name)
 	c := open(t, dir, 1<<30, 1<<29)
 	l := c.NewLease()
 	put(t, c, l, action(1), []byte("x"))
