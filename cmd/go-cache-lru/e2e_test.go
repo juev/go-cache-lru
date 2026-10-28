@@ -551,14 +551,30 @@ func (e *env) waitActive() server.Status {
 	}
 }
 
-// startSlowTest starts a go test in mod that keeps its session open for d.
+// startSlowTest starts a go test in mod that keeps its session open for d,
+// or until stopSlowTest.
 func (e *env) startSlowTest(mod string, d time.Duration) <-chan error {
 	e.t.Helper()
 	slow := filepath.Join(mod, "slow", "slow_test.go")
 	if err := os.MkdirAll(filepath.Dir(slow), 0o755); err != nil {
 		e.t.Fatal(err)
 	}
-	body := fmt.Sprintf("package slow\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(%d) }\n", d)
+	body := fmt.Sprintf(`package slow
+
+import (
+	"os"
+	"testing"
+	"time"
+)
+
+func TestSlow(t *testing.T) {
+	for end := time.Now().Add(%d); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Stat("stop"); err == nil {
+			return
+		}
+	}
+}
+`, d)
 	if err := os.WriteFile(slow, []byte(body), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
@@ -571,6 +587,16 @@ func (e *env) startSlowTest(mod string, d time.Duration) <-chan error {
 		done <- err
 	}()
 	return done
+}
+
+// stopSlowTest ends the test started by startSlowTest. Its test binary
+// may outlive the go command, and Windows cannot remove the module while
+// the binary runs in it.
+func (e *env) stopSlowTest(mod string) {
+	e.t.Helper()
+	if err := os.WriteFile(filepath.Join(mod, "slow", "stop"), nil, 0o644); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // checkReplaced builds mod and checks that a new daemon running the
@@ -672,7 +698,9 @@ func TestUpgradeUnderConstantLoad(t *testing.T) {
 	e.waitExit(old.PID, 12*time.Second)
 	e.checkReplaced(mod, old)
 	// The drain closed the slow test's session, so its result is not
-	// checked; wait for it only to let go of the module directory.
+	// checked. The go command fails early, but its test binary keeps
+	// running in the module directory until stopped.
+	e.stopSlowTest(mod)
 	<-slowDone
 }
 
