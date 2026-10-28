@@ -107,11 +107,14 @@ type Cache struct {
 	now      func() time.Time
 	logf     func(string, ...any)
 
-	mu      sync.Mutex
-	entries map[string]*entry
-	blobs   map[string]*blob
-	lru     *list.List // *entry, most recently used first
-	size    int64
+	mu       sync.Mutex
+	entries  map[string]*entry
+	blobs    map[string]*blob
+	lru      *list.List // *entry, most recently used first
+	size     int64
+	trash    []string       // outputs dropped under mu, removed by unlock
+	deleting map[string]int // outputs whose files unlock has yet to remove
+	deleted  sync.Cond      // signaled when unlock has removed files
 
 	idx     *index
 	evictCh chan struct{}
@@ -137,7 +140,9 @@ func Open(opts Options) (*Cache, error) {
 		now:      opts.Now,
 		logf:     opts.Logf,
 		evictCh:  make(chan struct{}, 1),
+		deleting: make(map[string]int),
 	}
+	c.deleted.L = &c.mu
 	c.tmpDir = filepath.Join(c.stateDir, "tmp")
 	c.goCache = dir
 	if opts.GoCache != "" {
@@ -218,7 +223,7 @@ func (c *Cache) NewLease() *Lease {
 func (l *Lease) Release() {
 	c := l.c
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlock()
 	for b, n := range l.pins {
 		b.pins -= n
 		c.maybeDropBlobLocked(b)
@@ -289,7 +294,7 @@ func (c *Cache) Get(l *Lease, actionID []byte) (Entry, bool, error) {
 		if c.entries[action] == e {
 			c.removeEntryLocked(e)
 		}
-		c.mu.Unlock()
+		c.unlock()
 		c.stats.Misses.Add(1)
 		return Entry{}, false, nil
 	}
@@ -332,7 +337,7 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 		if _, err := os.Stat(blobPath); err != nil {
 			c.mu.Lock()
 			l.unpinLocked(b)
-			c.mu.Unlock()
+			c.unlock()
 			b = nil
 		}
 	}
@@ -365,10 +370,15 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 		b = nil
 		c.mu.Unlock()
 	}
-	defer c.mu.Unlock()
+	defer c.unlock()
 
 	now := c.now()
 	if b == nil {
+		// A dropped copy of this object may still be waiting for its
+		// unlink, which would take our file with it.
+		for c.deleting[output] > 0 {
+			c.deleted.Wait()
+		}
 		if err := renameMkdir(tmp, blobPath); err != nil {
 			return Entry{}, err
 		}
@@ -471,13 +481,41 @@ func (c *Cache) removeEntryLocked(e *entry) {
 
 // maybeDropBlobLocked deletes an object nobody references or pins. An
 // object detached by a rescan is no longer ours to delete.
+//
+// Unlinking files takes long enough to stall every session waiting for the
+// lock, so the file is removed by unlock after the lock is released. Until
+// then the output is marked as deleting, and a put of the same output waits
+// before it moves a new file into place.
 func (c *Cache) maybeDropBlobLocked(b *blob) {
 	if b.refs > 0 || b.pins > 0 || c.blobs[b.output] != b {
 		return
 	}
-	_ = os.Remove(c.blobPath(b.output))
+	c.trash = append(c.trash, b.output)
+	c.deleting[b.output]++
 	delete(c.blobs, b.output)
 	c.size -= usage(b.size)
+}
+
+// unlock releases c.mu and then removes the objects dropped under it.
+// Code that may drop objects must release the lock through unlock.
+func (c *Cache) unlock() {
+	trash := c.trash
+	c.trash = nil
+	c.mu.Unlock()
+	if len(trash) == 0 {
+		return
+	}
+	for _, output := range trash {
+		_ = os.Remove(c.blobPath(output))
+	}
+	c.mu.Lock()
+	for _, output := range trash {
+		if c.deleting[output]--; c.deleting[output] == 0 {
+			delete(c.deleting, output)
+		}
+	}
+	c.deleted.Broadcast()
+	c.mu.Unlock()
 }
 
 // Evict removes least recently used entries until the cache is no larger
@@ -510,7 +548,7 @@ func (c *Cache) evict(target int64, all bool) (entries int, bytes int64) {
 		}
 		entries += removed
 		size := c.size
-		c.mu.Unlock()
+		c.unlock()
 		if removed == 0 {
 			if !all && size > target {
 				c.logf("evict: %d bytes left above target, the rest is pinned", size-target)
