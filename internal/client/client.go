@@ -78,9 +78,7 @@ func spawn(cfg config.Config) error {
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.Dir = "/"
-	// A new session detaches the daemon from the go command's process
-	// group, so Ctrl-C on a build does not reach it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
