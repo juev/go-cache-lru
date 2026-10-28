@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -162,16 +161,6 @@ func progArgs(prog, self string) []string {
 		return nil
 	}
 	return fields[1:]
-}
-
-// progName is the base name of a program path; on Windows without ".exe",
-// which GOCACHEPROG may leave out.
-func progName(p string) string {
-	name := filepath.Base(p)
-	if runtime.GOOS == "windows" {
-		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
-	}
-	return name
 }
 
 // splitQuoted splits s into fields the way the go command splits

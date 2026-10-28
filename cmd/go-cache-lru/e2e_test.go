@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,15 +19,6 @@ import (
 // These tests drive the real go command through the plugin binary.
 
 var pluginBin string
-
-// exeName is the plugin binary's file name; Windows runs only files
-// ending in ".exe".
-var exeName = func() string {
-	if runtime.GOOS == "windows" {
-		return "go-cache-lru.exe"
-	}
-	return "go-cache-lru"
-}()
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "gcl-bin-")
@@ -528,13 +518,7 @@ func replaceBinary(t *testing.T, bin string) {
 	if err != nil {
 		t.Fatalf("build replacement: %v\n%s", err, out)
 	}
-	if runtime.GOOS == "windows" {
-		// Windows does not replace a running executable, but lets it be
-		// renamed away.
-		if err := os.Rename(bin, bin+".old"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	moveAside(t, bin)
 	if err := os.Rename(bin+".new", bin); err != nil {
 		t.Fatal(err)
 	}
