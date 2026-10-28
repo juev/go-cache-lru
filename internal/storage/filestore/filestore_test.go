@@ -9,7 +9,7 @@ import (
 )
 
 func TestStore(t *testing.T) {
-	b, err := storage.Open(context.Background(), "file://"+t.TempDir())
+	b, err := storage.Open(context.Background(), storagetest.FileURL(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

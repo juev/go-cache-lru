@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -106,6 +107,13 @@ func TestProgArgs(t *testing.T) {
 		got := progArgs(tc.prog, self)
 		if (got == nil) != (tc.want == nil) || strings.Join(got, "|") != strings.Join(tc.want, "|") {
 			t.Errorf("progArgs(%q) = %q, want %q", tc.prog, got, tc.want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		// GOCACHEPROG may leave out ".exe".
+		got := progArgs(`C:\go\bin\go-cache-lru --dir=D:\c`, `C:\go\bin\Go-Cache-LRU.exe`)
+		if strings.Join(got, "|") != `--dir=D:\c` {
+			t.Errorf("progArgs without .exe = %q", got)
 		}
 	}
 }

@@ -8,10 +8,22 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/juev/go-cache-lru/internal/storage"
 )
+
+// FileURL returns the file URL of the directory dir: file:///tmp/x, or
+// file:///C:/x on Windows.
+func FileURL(dir string) string {
+	p := filepath.ToSlash(dir)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return "file://" + p
+}
 
 // Run exercises b. Drivers that skip empty objects pass skipEmpty.
 func Run(t *testing.T, b storage.Backend, skipEmpty bool) {
