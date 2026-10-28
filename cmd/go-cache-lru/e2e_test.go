@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juev/go-cache-lru/internal/cache"
 	"github.com/juev/go-cache-lru/internal/server"
 )
 
@@ -519,5 +520,40 @@ func TestVersionFlag(t *testing.T) {
 	}
 	if len(cmd) == 0 || string(flag) != string(cmd) {
 		t.Fatalf("--version printed %q, version command %q", flag, cmd)
+	}
+}
+
+func TestStatsHistory(t *testing.T) {
+	e := newEnv(t)
+	mod := writeModule(t, "")
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	st := e.stats()
+	if len(st.History) == 0 {
+		t.Fatal("no hourly history after a build")
+	}
+	// Summed over hours, so that a run across an hour boundary still holds.
+	var sum cache.HourStats
+	for _, h := range st.History {
+		sum = sum.Add(h)
+	}
+	if sum.Puts != st.Cache.Counters.Puts || sum.Misses != st.Cache.Counters.Misses {
+		t.Fatalf("history %+v does not add up to the counters %+v", sum, st.Cache.Counters)
+	}
+	if st.Advice.Kind != cache.AdviceCollecting {
+		t.Fatalf("advice on a fresh cache: %+v", st.Advice)
+	}
+	out, err := e.plugin("stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"this hour", "last 24 hours", "last 7 days", "advice", "not enough history yet"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stats lacks %q:\n%s", want, out)
+		}
+	}
+	if out, err := e.plugin("stats", "-v"); err != nil || !strings.Contains(out, "hourly, last 24 hours") {
+		t.Fatalf("stats -v: %v\n%s", err, out)
 	}
 }

@@ -169,6 +169,7 @@ func stats(cfg config.Config, o *cmdOpts) error {
 	printStatus(os.Stdout, st)
 	if st.Breakdown != nil {
 		printBreakdown(os.Stdout, *st.Breakdown, st.Cache.Size)
+		printHistory(os.Stdout, st.History)
 	}
 	return nil
 }
@@ -200,6 +201,48 @@ func printStatus(w io.Writer, st server.Status) {
 		p("remote", "%d hits, %d misses, %d puts, %d errors", k.RemoteHits, k.RemoteMisses, k.RemotePuts, k.RemoteErrors)
 	}
 	p("sessions", "%d", k.Sessions)
+
+	now := time.Now()
+	hour := now.Truncate(time.Hour)
+	windows := []struct {
+		name string
+		from time.Time
+	}{
+		{"this hour", hour},
+		{"last 24 hours", hour.Add(-23 * time.Hour)},
+		{"last 7 days", now.Add(-cache.HistoryWindow)},
+	}
+	for _, w := range windows {
+		var sum cache.HourStats
+		for _, h := range st.History {
+			if !h.Hour.Before(w.from) {
+				sum = sum.Add(h)
+			}
+		}
+		p(w.name, "%s", periodLine(sum))
+	}
+	p("advice", "%s", st.Advice.Text)
+}
+
+func periodLine(h cache.HourStats) string {
+	if h.Gets() == 0 && h.Puts == 0 {
+		return "no go commands"
+	}
+	return fmt.Sprintf("hit rate %.1f%%, %d gets, %s written, %d evictions",
+		100*(1-h.MissRate()), h.Gets(), config.FormatSize(h.PutBytes), h.EvictionRuns)
+}
+
+func printHistory(w io.Writer, hist []cache.HourStats) {
+	from := time.Now().Truncate(time.Hour).Add(-23 * time.Hour)
+	_, _ = fmt.Fprintln(w, "\nhourly, last 24 hours")
+	_, _ = fmt.Fprintf(w, "  %-6s %8s %9s %11s %9s %11s\n", "hour", "gets", "hit rate", "written", "evictions", "peak size")
+	for _, h := range hist {
+		if h.Hour.Before(from) {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "  %-6s %8d %8.1f%% %11s %9d %11s\n", h.Hour.Local().Format("15:04"), h.Gets(),
+			100*(1-h.MissRate()), config.FormatSize(h.PutBytes), h.EvictionRuns, config.FormatSize(h.PeakSize))
+	}
 }
 
 func printBreakdown(w io.Writer, d cache.Breakdown, total int64) {
