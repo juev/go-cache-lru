@@ -152,22 +152,68 @@ go-cache-lru --version                               # version of the binary
 ```
 
 `stats -v` shows where the space goes, which helps to choose the limits.
-Output for a small cache after one build:
+Output from a workstation with a 30 GiB limit, a day after the counters
+were started, while a go command was running:
 
 ```
+daemon          pid 31187, version v0.2.1-0.20261028125138-c819f9224beb c819f9224beb, up 16m47s, 1 active sessions
+directory       /Users/me/.cache/go-lru
+size            27.2 GiB of 30.0 GiB (target 25.0 GiB), 90.5%
+entries         71159 actions, 18843 objects, 1707 pinned
+counters since  2026-10-27 16:38:51
+hits            1729571 (96.8%), 365.7 GiB served
+misses          56864
+puts            104025, 48.7 GiB written
+evictions       19209 entries, 20.3 GiB
+cleans          0 explicit, 1 by go clean -cache
+sessions        1092
+this hour       hit rate 98.3%, 110634 gets, 1.2 GiB written, 0 evictions
+last 24 hours   hit rate 97.5%, 318152 gets, 6.9 GiB written, 1 evictions
+last 7 days     hit rate 97.5%, 318152 gets, 6.9 GiB written, 1 evictions
+advice          not enough history yet: 2 of 24 active hours
+
 objects by size
-  < 64 KiB                618     4.9 MiB    2.4%
-  64 KiB - 1 MiB          187    55.4 MiB   27.6%
-  1 MiB - 10 MiB           39   100.3 MiB   50.0%
-  10 MiB - 100 MiB          2    39.9 MiB   19.9%
-  >= 100 MiB                0         0 B    0.0%
+  < 64 KiB               9706    69.9 MiB    0.3%
+  64 KiB - 1 MiB         6482     2.5 GiB    9.2%
+  1 MiB - 10 MiB         2214     5.1 GiB   18.8%
+  10 MiB - 100 MiB        439    19.2 GiB   70.8%
+  >= 100 MiB                2   253.8 MiB    0.9%
 
 objects by last access
-  < 1h                    846   200.4 MiB  100.0%
-  1h - 6h                   0         0 B    0.0%
+  < 1h                  14033    16.9 GiB   62.4%
+  1h - 6h                4810    10.2 GiB   37.6%
   6h - 24h                  0         0 B    0.0%
   >= 24h                    0         0 B    0.0%
+
+hourly, last 24 hours
+  hour       gets  hit rate     written evictions   peak size
+  15:00    207518     97.2%     5.8 GiB         1    30.0 GiB
+  16:00    110634     98.3%     1.2 GiB         0    27.2 GiB
 ```
+
+How to read it:
+
+- `up 16m47s` with counters since the day before: the daemon was restarted
+  after an upgrade. Counters, the index and the history persist across
+  restarts.
+- `hits` and `puts`: 96.8% of lookups hit, and the cache served 365.7 GiB
+  while 48.7 GiB was written to it.
+- `size` and `evictions`: the cache reached `--max-size` and was trimmed to
+  `--target-size`; since the counters started, 19 209 entries (20.3 GiB)
+  were evicted.
+- `pinned`: objects handed to the running go command. Eviction skips them
+  until its session ends.
+- `cleans`: the daemon noticed one `go clean -cache` and removed every
+  entry not in use (see [go clean -cache](#go-clean--cache)).
+- In the period lines and the hourly table, `evictions` counts eviction runs,
+  not entries. The single run at 15:00 matches the 30.0 GiB peak size.
+- `objects by size`: 441 objects of 10 MiB and more hold 71.7% of the space,
+  so they decide how much fits under the limit.
+- `objects by last access`: everything left was used in the last 6 hours;
+  older objects were evicted or removed by the clean. If builds of older
+  branches should still hit, raise `--max-size`.
+- `advice`: the history needs 24 hours with go commands before it suggests
+  a limit.
 
 ### Hourly history and size advice
 
