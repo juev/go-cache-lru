@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -83,15 +84,25 @@ type index struct {
 	closeErr  error
 }
 
-func openIndex(path string, logf func(string, ...any)) (*index, error) {
+// indexDSN returns the SQLite URI for the index at path.
+func indexDSN(path string) string {
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "busy_timeout(10000)")
+	// SQLite wants forward slashes and a slash before a drive letter:
+	// file:/C:/Users/...
+	path = filepath.ToSlash(path)
+	if len(path) >= 2 && path[1] == ':' {
+		path = "/" + path
+	}
 	// url.URL escapes "?", "#" and "%" in the path, which SQLite would
 	// otherwise parse as URI syntax.
-	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: q.Encode()}).String()
-	db, err := sql.Open("sqlite", dsn)
+	return (&url.URL{Scheme: "file", OmitHost: true, Path: path, RawQuery: q.Encode()}).String()
+}
+
+func openIndex(path string, logf func(string, ...any)) (*index, error) {
+	db, err := sql.Open("sqlite", indexDSN(path))
 	if err != nil {
 		return nil, err
 	}
