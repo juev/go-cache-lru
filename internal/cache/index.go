@@ -10,9 +10,10 @@ import (
 	_ "modernc.org/sqlite" // database/sql driver "sqlite"
 )
 
-// flushInterval bounds how long an index change waits before it is
-// written. A crash loses at most this much of the index; the next start
-// reconciles the table with the objects on disk, so nothing is corrupted.
+// flushInterval is how long the first queued change waits for others to
+// join its batch. A crash loses at most this much of the index; the next
+// start reconciles the table with the objects on disk, so nothing is
+// corrupted.
 const flushInterval = 100 * time.Millisecond
 
 const schema = `
@@ -51,13 +52,15 @@ type row struct {
 
 // index persists the in-memory index to SQLite. Changes are queued in
 // order and written in batches by a background goroutine, so the cache's
-// hot path never waits for the database.
+// hot path never waits for the database. The goroutine sleeps until a
+// change arrives: an idle daemon does not wake up for the index.
 type index struct {
 	db   *sql.DB
 	logf func(string, ...any)
 
 	mu      sync.Mutex
 	pending []op
+	wake    chan struct{} // a change arrived in an empty queue
 
 	flushMu   sync.Mutex // serializes flushes to keep op order
 	stop      chan struct{}
@@ -83,15 +86,26 @@ func openIndex(path string, logf func(string, ...any)) (*index, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("index %s: %w", path, err)
 	}
-	x := &index{db: db, logf: logf, stop: make(chan struct{}), done: make(chan struct{})}
+	x := &index{db: db, logf: logf, wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	go x.loop()
 	return x, nil
 }
 
 func (x *index) add(o op) {
 	x.mu.Lock()
+	first := len(x.pending) == 0
 	x.pending = append(x.pending, o)
 	x.mu.Unlock()
+	if first {
+		x.signal()
+	}
+}
+
+func (x *index) signal() {
+	select {
+	case x.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (x *index) upsert(action, output string, size int64, put time.Time) {
@@ -109,16 +123,26 @@ func (x *index) delete(action string) {
 
 func (x *index) loop() {
 	defer close(x.done)
-	t := time.NewTicker(flushInterval)
-	defer t.Stop()
+	t := time.NewTimer(flushInterval)
+	t.Stop()
 	for {
 		select {
-		case <-t.C:
-			if err := x.flush(); err != nil {
-				x.logf("index flush: %v", err)
-			}
+		case <-x.wake:
 		case <-x.stop:
 			return
+		}
+		// Let the rest of the burst join the batch.
+		t.Reset(flushInterval)
+		select {
+		case <-t.C:
+		case <-x.stop:
+			t.Stop()
+			return
+		}
+		if err := x.flush(); err != nil {
+			x.logf("index flush: %v", err)
+			// The batch is queued again; retry after another interval.
+			x.signal()
 		}
 	}
 }

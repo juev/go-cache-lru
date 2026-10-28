@@ -242,25 +242,17 @@ func (c *Cache) CheckExternalClean() bool {
 	return true
 }
 
-// Run performs background work until ctx is done: eviction after puts,
-// detection of "go clean -cache" and periodic saving of counters.
+// Run evicts in the background until ctx is done, whenever a put or a
+// released lease leaves the cache above the limit. Detecting "go clean
+// -cache" and saving counters are driven by the server, which knows when
+// go commands are active.
 func (c *Cache) Run(ctx context.Context) {
-	cleanTick := time.NewTicker(2 * time.Second)
-	defer cleanTick.Stop()
-	statsTick := time.NewTicker(30 * time.Second)
-	defer statsTick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.evictCh:
 			c.evictIfNeeded()
-		case <-cleanTick.C:
-			c.CheckExternalClean()
-		case <-statsTick.C:
-			if err := c.SaveStats(); err != nil {
-				c.logf("save stats: %v", err)
-			}
 		}
 	}
 }

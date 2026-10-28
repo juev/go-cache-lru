@@ -20,6 +20,14 @@ import (
 	"github.com/juev/go-cache-lru/internal/storage"
 )
 
+const (
+	// busyInterval is how often an active server checks for "go clean
+	// -cache" while go commands run.
+	busyInterval = 2 * time.Second
+	// statsInterval is how often counters are saved while go commands run.
+	statsInterval = 30 * time.Second
+)
+
 // Options configure a Server.
 type Options struct {
 	Cache *cache.Cache
@@ -48,6 +56,7 @@ type Server struct {
 
 	shutdown     chan struct{} // closed to request shutdown
 	shutdownOnce sync.Once
+	activity     chan struct{} // a go command session started or ended
 
 	mu       sync.Mutex
 	conns    map[net.Conn]struct{}
@@ -68,6 +77,7 @@ func New(opts Options) *Server {
 		logf:     logf,
 		started:  time.Now(),
 		shutdown: make(chan struct{}),
+		activity: make(chan struct{}, 1),
 		conns:    make(map[net.Conn]struct{}),
 		idleFrom: time.Now(),
 	}
@@ -123,6 +133,21 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 	}()
 
+	// Periodic work runs only while go commands are active, so an idle
+	// daemon does not wake up.
+	var (
+		busy     *time.Ticker
+		busyTick <-chan time.Time
+		lastSave = time.Now()
+	)
+	stopBusy := func() {
+		if busy != nil {
+			busy.Stop()
+			busy, busyTick = nil, nil
+		}
+	}
+	defer stopBusy()
+
 	var idleTick <-chan time.Time
 	if s.opts.IdleTimeout > 0 {
 		t := time.NewTicker(min(s.opts.IdleTimeout/4+time.Millisecond, 10*time.Second))
@@ -143,6 +168,23 @@ loop:
 		case err = <-acceptErr:
 			s.logf("accept: %v", err)
 			break loop
+		case <-s.activity:
+			s.saveStats()
+			lastSave = time.Now()
+			if s.activeSessions() == 0 {
+				stopBusy()
+			} else if busy == nil {
+				busy = time.NewTicker(busyInterval)
+				busyTick = busy.C
+			}
+		case <-busyTick:
+			// A "go clean -cache" during a build; between builds the next
+			// session start notices it.
+			s.cache.CheckExternalClean()
+			if time.Since(lastSave) >= statsInterval {
+				s.saveStats()
+				lastSave = time.Now()
+			}
 		case <-idleTick:
 			if s.idleFor() >= s.opts.IdleTimeout {
 				s.logf("idle for %v, exiting", s.opts.IdleTimeout)
@@ -159,9 +201,7 @@ loop:
 	}
 	cancelBg()
 	bgDone.Wait()
-	if serr := s.cache.SaveStats(); serr != nil {
-		s.logf("save stats: %v", serr)
-	}
+	s.saveStats()
 	if errors.Is(err, net.ErrClosed) {
 		err = nil
 	}
@@ -194,6 +234,25 @@ func (s *Server) drain() {
 	<-done
 }
 
+func (s *Server) saveStats() {
+	if err := s.cache.SaveStats(); err != nil {
+		s.logf("save stats: %v", err)
+	}
+}
+
+func (s *Server) signalActivity() {
+	select {
+	case s.activity <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) activeSessions() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
+}
+
 func (s *Server) track(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,6 +275,7 @@ func (s *Server) untrack(conn net.Conn, wasSession bool) {
 		if s.active == 0 {
 			s.idleFrom = time.Now()
 		}
+		s.signalActivity()
 	}
 	s.sessions.Done()
 }
@@ -249,6 +309,10 @@ func (s *Server) handle(conn net.Conn) {
 		s.untrack(conn, ss.counted)
 	}()
 
+	// Nothing watches for "go clean -cache" while the daemon is idle, so
+	// look before serving anything from a cache that may be gone.
+	s.cache.CheckExternalClean()
+
 	hello := &protocol.Response{KnownCommands: []protocol.Cmd{protocol.CmdGet, protocol.CmdPut, protocol.CmdClose}}
 	if err := ss.w.Write(hello); err != nil {
 		return
@@ -268,6 +332,7 @@ func (s *Server) handle(conn net.Conn) {
 			s.active++
 			s.mu.Unlock()
 			s.cache.Counters().Sessions.Add(1)
+			s.signalActivity()
 		}
 		switch req.Command {
 		case protocol.CmdGet:
