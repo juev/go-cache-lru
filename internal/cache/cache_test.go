@@ -354,6 +354,24 @@ func TestGetAfterFileRemovedIsMiss(t *testing.T) {
 	mustHit(t, c, l, action(2), []byte("x"))
 }
 
+// TestPutRestoresRemovedFile puts an object whose file was removed behind
+// the cache's back, as "go clean -cache" does between two rescans.
+func TestPutRestoresRemovedFile(t *testing.T) {
+	c := open(t, t.TempDir(), 1<<30, 1<<29)
+	l := c.NewLease()
+	e := put(t, c, l, action(1), []byte("x"))
+	l.Release()
+	if err := os.Remove(e.Path); err != nil {
+		t.Fatal(err)
+	}
+	l = c.NewLease()
+	defer l.Release()
+	e = put(t, c, l, action(2), []byte("x"))
+	if got, err := os.ReadFile(e.Path); err != nil || string(got) != "x" {
+		t.Fatalf("object after put: %q, %v", got, err)
+	}
+}
+
 func TestConcurrentSessions(t *testing.T) {
 	const obj = 2 * blockSize
 	// Small limit so that eviction races with puts and gets.

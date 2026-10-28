@@ -391,10 +391,10 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 		for c.deleting[output] > 0 {
 			c.deleted.Wait()
 		}
-		if old := c.blobs[output]; old != nil && old.size == size {
+		if old := c.blobs[output]; old != nil && old.size == size && fileExists(blobPath) {
 			// A concurrent put stored the same object first. Keep its file:
 			// a reader may have it open, and Windows cannot replace an open
-			// file.
+			// file. A file removed behind our back is written again below.
 			b = old
 		} else {
 			if err := renameMkdir(tmp, blobPath); err != nil {
@@ -479,6 +479,11 @@ func (c *Cache) writeTemp(outputID []byte, size int64, body io.Reader) (string, 
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // renameMkdir renames old to new, recreating new's directory if a
