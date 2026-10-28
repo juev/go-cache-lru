@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -13,18 +14,28 @@ import (
 
 	"github.com/juev/go-cache-lru/internal/cache"
 	"github.com/juev/go-cache-lru/internal/server"
+	"github.com/juev/go-cache-lru/internal/storage/storagetest"
 )
 
 // These tests drive the real go command through the plugin binary.
 
 var pluginBin string
 
+// exeName is the plugin binary's file name; Windows runs only files
+// ending in ".exe".
+var exeName = func() string {
+	if runtime.GOOS == "windows" {
+		return "go-cache-lru.exe"
+	}
+	return "go-cache-lru"
+}()
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "gcl-bin-")
 	if err != nil {
 		panic(err)
 	}
-	pluginBin = filepath.Join(dir, "go-cache-lru")
+	pluginBin = filepath.Join(dir, exeName)
 	out, err := exec.Command("go", "build", "-o", pluginBin, ".").CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "build plugin: %v\n%s", err, out)
@@ -414,7 +425,7 @@ func TestControlCommandsUseGoCacheProg(t *testing.T) {
 // TestRemoteTier builds on one machine and reads the results on another
 // through shared remote storage.
 func TestRemoteTier(t *testing.T) {
-	shared := "--remote=file://" + t.TempDir()
+	shared := "--remote=" + storagetest.FileURL(t.TempDir())
 	dirA, dirB := t.TempDir(), t.TempDir()
 	a := newEnv(t, "GOCACHEPROG="+pluginBin+" --dir="+dirA+" "+shared)
 	a.ctl = []string{"--dir=" + dirA}
@@ -493,7 +504,7 @@ const replacedVersion = "replaced-in-test"
 // copyPlugin returns a copy of the plugin binary that a test may replace.
 func copyPlugin(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "go-cache-lru")
+	bin := filepath.Join(t.TempDir(), exeName)
 	data, err := os.ReadFile(pluginBin)
 	if err != nil {
 		t.Fatal(err)
@@ -512,6 +523,13 @@ func replaceBinary(t *testing.T, bin string) {
 		"-ldflags", "-X github.com/juev/go-cache-lru/internal/server.version="+replacedVersion, ".").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build replacement: %v\n%s", err, out)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows does not replace a running executable, but lets it be
+		// renamed away.
+		if err := os.Rename(bin, bin+".old"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Rename(bin+".new", bin); err != nil {
 		t.Fatal(err)
