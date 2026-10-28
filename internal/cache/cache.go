@@ -19,6 +19,7 @@
 package cache
 
 import (
+	"bufio"
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,6 +46,9 @@ const (
 
 	// blockSize approximates file system allocation for size accounting.
 	blockSize = 4096
+
+	// writeBuffer batches writes of an object body to its temp file.
+	writeBuffer = 256 << 10
 
 	// touchInterval limits how often an access is written to the index.
 	// The in-memory LRU order is always exact; the stored access time only
@@ -437,7 +441,13 @@ func (c *Cache) writeTemp(outputID []byte, size int64, body io.Reader) (string, 
 		}
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), body)
+	// The protocol body decodes in pieces of at most 768 bytes; unbuffered,
+	// each one would be its own write system call.
+	w := bufio.NewWriterSize(f, writeBuffer)
+	n, err := io.Copy(io.MultiWriter(w, h), body)
+	if err == nil {
+		err = w.Flush()
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
