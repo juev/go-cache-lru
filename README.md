@@ -53,6 +53,9 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
   accepting connections, wait for running go commands (`--shutdown-timeout`,
   1 minute by default), flush queued uploads and save statistics. Ctrl-C on a
   build does not reach the daemon: it runs in its own session.
+- **Picks up upgrades.** A daemon whose binary was replaced on disk exits
+  gracefully after serving the go command that noticed it, so the next one
+  runs the new version.
 - **Pluggable remote storage.** Optional second tier behind the local disk:
   `file://` for a directory such as a network share, `s3://` for AWS S3,
   Cloudflare R2, MinIO and other S3-compatible services.
@@ -142,7 +145,12 @@ go-cache-lru --dir=$HOME/.cache/go-lru stop          # graceful shutdown
 go-cache-lru --dir=$HOME/.cache/go-lru serve         # run the daemon in the foreground
 ```
 
-Upgrading the binary: `go install` the new version, then `go-cache-lru stop`.
+Upgrading the binary: `go install` the new version, or write it next to the
+old one and rename it into place. Do not overwrite the running file in place:
+macOS may kill a process whose binary changed under it. The daemon checks its binary whenever a go command or a control command
+connects. The first connection after the upgrade is still served by the old
+daemon, which then exits once its running go commands finish. The next go
+command starts the new binary. `go-cache-lru stop` switches at once.
 
 ### go clean -cache
 
