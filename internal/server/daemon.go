@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/juev/go-cache-lru/internal/cache"
@@ -21,7 +20,10 @@ import (
 // ErrAlreadyRunning means another daemon owns the cache directory.
 var ErrAlreadyRunning = errors.New("daemon already running for this cache directory")
 
-// LockFile takes an exclusive flock on path, retrying for up to wait.
+// errLocked means another process holds the lock.
+var errLocked = errors.New("locked by another process")
+
+// LockFile takes an exclusive lock on path, retrying for up to wait.
 // The lock dies with the process, so a crashed daemon never blocks the
 // next one.
 func LockFile(path string, wait time.Duration) (*os.File, error) {
@@ -34,13 +36,13 @@ func LockFile(path string, wait time.Duration) (*os.File, error) {
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err = tryLock(f)
 		if err == nil {
 			return f, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+		if !errors.Is(err, errLocked) || time.Now().After(deadline) {
 			_ = f.Close()
-			if errors.Is(err, syscall.EWOULDBLOCK) {
+			if errors.Is(err, errLocked) {
 				return nil, ErrAlreadyRunning
 			}
 			return nil, err
