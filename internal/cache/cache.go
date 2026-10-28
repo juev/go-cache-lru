@@ -391,21 +391,28 @@ func (c *Cache) Put(l *Lease, actionID, outputID []byte, size int64, body io.Rea
 		for c.deleting[output] > 0 {
 			c.deleted.Wait()
 		}
-		if err := renameMkdir(tmp, blobPath); err != nil {
-			return Entry{}, err
-		}
-		tmp = ""
-		if old := c.blobs[output]; old != nil {
-			// Same content; reuse the record so pins and refs stay together.
-			c.size -= usage(old.size)
-			old.size = size
+		if old := c.blobs[output]; old != nil && old.size == size {
+			// A concurrent put stored the same object first. Keep its file:
+			// a reader may have it open, and Windows cannot replace an open
+			// file.
 			b = old
 		} else {
-			b = &blob{output: output, size: size}
-			c.blobs[output] = b
+			if err := renameMkdir(tmp, blobPath); err != nil {
+				return Entry{}, err
+			}
+			tmp = ""
+			if old != nil {
+				// Same content; reuse the record so pins and refs stay together.
+				c.size -= usage(old.size)
+				old.size = size
+				b = old
+			} else {
+				b = &blob{output: output, size: size}
+				c.blobs[output] = b
+			}
+			c.size += usage(size)
+			c.peak = max(c.peak, c.size)
 		}
-		c.size += usage(size)
-		c.peak = max(c.peak, c.size)
 		l.pinLocked(b)
 	}
 	c.idx.upsert(action, output, size, now)
