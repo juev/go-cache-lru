@@ -105,6 +105,7 @@ func Bridge(cfg config.Config, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	protocol.SetBuffers(conn)
 
 	// Ctrl-C reaches the whole process group. The go command shuts the
 	// cache down itself by closing our stdin, so keep relaying until then
