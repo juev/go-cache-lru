@@ -101,11 +101,16 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 		logf("remote storage %s", redact(cfg.Remote))
 	}
 
+	exe, err := os.Executable()
+	if err != nil {
+		logf("executable: %v; the daemon will not notice an upgrade", err)
+	}
 	srv := New(Options{
 		Cache:        c,
 		Remote:       backend,
 		IdleTimeout:  cfg.IdleTimeout,
 		DrainTimeout: cfg.DrainTimeout,
+		Executable:   exe,
 		Logf:         logf,
 	})
 	// Evict right away if the limit shrank since the last run.

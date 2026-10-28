@@ -30,7 +30,11 @@ type Options struct {
 	IdleTimeout time.Duration
 	// DrainTimeout bounds how long shutdown waits for active sessions.
 	DrainTimeout time.Duration
-	Logf         func(format string, args ...any)
+	// Executable is the daemon binary. When a new connection finds it
+	// replaced, the server serves that connection and shuts down, so the
+	// next go command starts the new binary. Empty disables the check.
+	Executable string
+	Logf       func(format string, args ...any)
 }
 
 // Server is the daemon.
@@ -38,6 +42,7 @@ type Server struct {
 	opts    Options
 	cache   *cache.Cache
 	remote  *remote
+	exe     *exeWatch
 	logf    func(string, ...any)
 	started time.Time
 
@@ -68,6 +73,9 @@ func New(opts Options) *Server {
 	}
 	if opts.Remote != nil {
 		s.remote = newRemote(opts.Remote, opts.Cache, logf)
+	}
+	if opts.Executable != "" {
+		s.exe = newExeWatch(opts.Executable)
 	}
 	return s
 }
@@ -106,6 +114,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				continue
 			}
 			go s.handle(conn)
+			// Checked per connection rather than on a timer, so an idle
+			// daemon does not wake up for it.
+			if s.exe.replaced() {
+				s.logf("%s was replaced, exiting after active sessions", s.exe.path)
+				s.Shutdown()
+			}
 		}
 	}()
 

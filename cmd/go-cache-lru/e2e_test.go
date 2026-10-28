@@ -445,3 +445,58 @@ func TestGoCommandDuringDrain(t *testing.T) {
 		t.Fatalf("slow test: %v", err)
 	}
 }
+
+// TestRestartsAfterBinaryReplaced installs a new binary under the path in
+// GOCACHEPROG while the daemon runs. The go command that notices it must
+// still succeed, and the next one must be served by the new binary.
+func TestRestartsAfterBinaryReplaced(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "go-cache-lru")
+	data, err := os.ReadFile(pluginBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, "GOCACHEPROG="+bin)
+	mod := writeModule(t, "")
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("first build: %v\n%s", err, out)
+	}
+	old := e.stats()
+
+	// Build the replacement next to it and rename it into place, the way
+	// go install does.
+	const version = "replaced-in-test"
+	out, err := exec.Command("go", "build", "-o", bin+".new",
+		"-ldflags", "-X github.com/juev/go-cache-lru/internal/server.version="+version, ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("build replacement: %v\n%s", err, out)
+	}
+	if err := os.Rename(bin+".new", bin); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := e.run(writeModule(t, "x"), "go", "build", "./..."); err != nil {
+		t.Fatalf("build that notices the new binary: %v\n%s", err, out)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for e.statsOrZero().PID == old.PID {
+		if time.Now().After(deadline) {
+			t.Fatal("old daemon still running after its binary was replaced")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if out, err := e.run(mod, "go", "build", "./..."); err != nil {
+		t.Fatalf("build after restart: %v\n%s", err, out)
+	}
+	st := e.stats()
+	if st.Version != version || st.PID == old.PID {
+		t.Fatalf("daemon after restart: pid %d version %q, want a new pid with version %q (old pid %d)",
+			st.PID, st.Version, version, old.PID)
+	}
+	if st.Cache.Entries < old.Cache.Entries {
+		t.Fatalf("new daemon lost the cache: %d entries, had %d", st.Cache.Entries, old.Cache.Entries)
+	}
+}
