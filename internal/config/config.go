@@ -27,21 +27,32 @@ const (
 	EnvSocket       = "GOCACHELRU_SOCKET"
 	EnvIdleTimeout  = "GOCACHELRU_IDLE_TIMEOUT"
 	EnvDrainTimeout = "GOCACHELRU_SHUTDOWN_TIMEOUT"
+	EnvAutoUpdate   = "GOCACHELRU_AUTO_UPDATE"
+	EnvUpdateEvery  = "GOCACHELRU_UPDATE_INTERVAL"
 )
 
 // DefaultDrainTimeout is the default for --shutdown-timeout.
 const DefaultDrainTimeout = time.Minute
 
+// DefaultUpdateInterval is the default for --update-interval, and
+// MinUpdateInterval its lower bound, which keeps requests to GitHub rare.
+const (
+	DefaultUpdateInterval = 6 * time.Hour
+	MinUpdateInterval     = time.Hour
+)
+
 // Config is the resolved configuration.
 type Config struct {
-	Dir          string        // cache directory
-	GoCache      string        // the go command's GOCACHE, watched for "go clean -cache"
-	MaxSize      int64         // eviction starts above this
-	TargetSize   int64         // eviction shrinks to this
-	Remote       string        // optional remote storage URL
-	Socket       string        // daemon socket path
-	IdleTimeout  time.Duration // daemon exits after this long without sessions; 0 never
-	DrainTimeout time.Duration // how long shutdown waits for active sessions
+	Dir            string        // cache directory
+	GoCache        string        // the go command's GOCACHE, watched for "go clean -cache"
+	MaxSize        int64         // eviction starts above this
+	TargetSize     int64         // eviction shrinks to this
+	Remote         string        // optional remote storage URL
+	Socket         string        // daemon socket path
+	IdleTimeout    time.Duration // daemon exits after this long without sessions; 0 never
+	DrainTimeout   time.Duration // how long shutdown waits for active sessions
+	AutoUpdate     bool          // the daemon installs new releases
+	UpdateInterval time.Duration // how often the daemon looks for one
 }
 
 // StateDir is where the daemon keeps its lock, log and statistics.
@@ -60,7 +71,8 @@ func (c Config) LogPath() string { return filepath.Join(c.StateDir(), "daemon.lo
 // environment variable, so flags win over the environment.
 type Flags struct {
 	dir, maxSize, targetSize, remote, socket string
-	idle, drain                              time.Duration
+	idle, drain, updateEvery                 time.Duration
+	autoUpdate                               bool
 	envErr                                   error
 }
 
@@ -79,6 +91,12 @@ func Register(fs *flag.FlagSet) *Flags {
 	f.envErr = errors.Join(f.envErr, err)
 	fs.DurationVar(&f.idle, "idle-timeout", f.idle, "stop the daemon after this long without go commands, 0 never ["+EnvIdleTimeout+"]")
 	fs.DurationVar(&f.drain, "shutdown-timeout", f.drain, "how long shutdown waits for running go commands ["+EnvDrainTimeout+"]")
+	f.autoUpdate, err = boolEnv(EnvAutoUpdate)
+	f.envErr = errors.Join(f.envErr, err)
+	f.updateEvery, err = durationEnv(EnvUpdateEvery, DefaultUpdateInterval)
+	f.envErr = errors.Join(f.envErr, err)
+	fs.BoolVar(&f.autoUpdate, "auto-update", f.autoUpdate, "let the daemon install new releases from GitHub ["+EnvAutoUpdate+"]")
+	fs.DurationVar(&f.updateEvery, "update-interval", f.updateEvery, "how often the daemon looks for a new release ["+EnvUpdateEvery+"]")
 	return f
 }
 
@@ -115,6 +133,11 @@ func (f *Flags) Resolve() (Config, error) {
 	c.Remote = f.remote
 	c.IdleTimeout = f.idle
 	c.DrainTimeout = f.drain
+	if f.updateEvery < MinUpdateInterval {
+		return c, fmt.Errorf("--update-interval (%v) must be at least %v", f.updateEvery, MinUpdateInterval)
+	}
+	c.AutoUpdate = f.autoUpdate
+	c.UpdateInterval = f.updateEvery
 	c.Socket = expandHome(f.socket)
 	if c.Socket == "" {
 		c.Socket = defaultSocket(c.StateDir())
@@ -132,6 +155,8 @@ func (c Config) Args() []string {
 		"--socket=" + c.Socket,
 		"--idle-timeout=" + c.IdleTimeout.String(),
 		"--shutdown-timeout=" + c.DrainTimeout.String(),
+		"--auto-update=" + strconv.FormatBool(c.AutoUpdate),
+		"--update-interval=" + c.UpdateInterval.String(),
 	}
 	if c.Remote != "" {
 		args = append(args, "--remote="+c.Remote)
@@ -252,6 +277,18 @@ func durationEnv(name string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return d, nil
+}
+
+func boolEnv(name string) (bool, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s: invalid boolean %q", name, v)
+	}
+	return b, nil
 }
 
 var sizeUnits = []struct {

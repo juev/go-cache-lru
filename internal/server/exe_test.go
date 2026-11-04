@@ -3,6 +3,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -17,6 +18,17 @@ func TestExeWatch(t *testing.T) {
 		}
 	}
 	write(path, "v1")
+	// The daemon runs its binary, which keeps the file open: a file
+	// written after it is removed cannot get its inode, and with the same
+	// size and mtime look unchanged. Windows removes neither an open file
+	// nor a running binary.
+	if runtime.GOOS != "windows" {
+		running, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = running.Close() }()
+	}
 
 	w := newExeWatch(path)
 	if w.replaced() {

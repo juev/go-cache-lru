@@ -3,8 +3,10 @@ package config
 import (
 	"flag"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSize(t *testing.T) {
@@ -37,7 +39,7 @@ func parse(t *testing.T, args ...string) (Config, error) {
 func TestDefaults(t *testing.T) {
 	gocache := t.TempDir()
 	t.Setenv("GOCACHE", gocache)
-	for _, k := range []string{EnvDir, EnvMaxSize, EnvTargetSize, EnvSocket, EnvRemote} {
+	for _, k := range []string{EnvDir, EnvMaxSize, EnvTargetSize, EnvSocket, EnvRemote, EnvAutoUpdate, EnvUpdateEvery} {
 		t.Setenv(k, "")
 	}
 	c, err := parse(t)
@@ -46,6 +48,75 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.Dir != gocache || c.GoCache != gocache || c.MaxSize != 30<<30 || c.TargetSize != 25<<30 {
 		t.Fatalf("defaults: %+v", c)
+	}
+	if c.AutoUpdate || c.UpdateInterval != 6*time.Hour {
+		t.Fatalf("update defaults: auto-update %v, interval %v; want false, 6h", c.AutoUpdate, c.UpdateInterval)
+	}
+}
+
+func TestAutoUpdateSettings(t *testing.T) {
+	t.Setenv("GOCACHE", t.TempDir())
+	t.Setenv(EnvAutoUpdate, "true")
+	t.Setenv(EnvUpdateEvery, "12h")
+	c, err := parse(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AutoUpdate || c.UpdateInterval != 12*time.Hour {
+		t.Fatalf("from the environment: auto-update %v, interval %v; want true, 12h", c.AutoUpdate, c.UpdateInterval)
+	}
+	c, err = parse(t, "--auto-update=false", "--update-interval=24h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AutoUpdate || c.UpdateInterval != 24*time.Hour {
+		t.Fatalf("flags over the environment: auto-update %v, interval %v; want false, 24h", c.AutoUpdate, c.UpdateInterval)
+	}
+}
+
+func TestRejectsBadUpdateSettings(t *testing.T) {
+	t.Setenv("GOCACHE", t.TempDir())
+	for _, tc := range []struct{ auto, every string }{
+		{"maybe", ""},
+		{"", "soon"},
+		{"", "0s"},
+		{"", "-6h"},
+		{"", "59m"}, // below the minimum, which keeps requests to GitHub rare
+	} {
+		t.Setenv(EnvAutoUpdate, tc.auto)
+		t.Setenv(EnvUpdateEvery, tc.every)
+		if _, err := parse(t); err == nil {
+			t.Errorf("%s=%q %s=%q: want error", EnvAutoUpdate, tc.auto, EnvUpdateEvery, tc.every)
+		}
+	}
+	t.Setenv(EnvAutoUpdate, "")
+	t.Setenv(EnvUpdateEvery, "")
+	if _, err := parse(t, "--update-interval=30m"); err == nil {
+		t.Error("--update-interval=30m: want error")
+	}
+}
+
+// TestArgsForwardUpdateSettings checks that a spawned daemon gets the
+// client's update settings even when its inherited environment says
+// otherwise.
+func TestArgsForwardUpdateSettings(t *testing.T) {
+	t.Setenv("GOCACHE", t.TempDir())
+	for _, auto := range []bool{true, false} {
+		t.Setenv(EnvAutoUpdate, "")
+		t.Setenv(EnvUpdateEvery, "")
+		c, err := parse(t, "--auto-update="+strconv.FormatBool(auto), "--update-interval=3h")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(EnvAutoUpdate, strconv.FormatBool(!auto))
+		t.Setenv(EnvUpdateEvery, "48h")
+		d, err := parse(t, c.Args()...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.AutoUpdate != auto || d.UpdateInterval != 3*time.Hour {
+			t.Fatalf("daemon got auto-update %v, interval %v; client had %v, 3h (args %q)", d.AutoUpdate, d.UpdateInterval, auto, c.Args())
+		}
 	}
 }
 

@@ -60,6 +60,9 @@ See [Use](#use) for fish, prebuilt binaries and all flags.
 - **Picks up upgrades.** A daemon whose binary was replaced on disk keeps
   serving and exits at the first moment no go command is connected, so the
   next one runs the new version and no go command waits for the switch.
+- **Optional automatic updates.** With `--auto-update` the daemon installs
+  new releases from GitHub in the background on Linux and macOS. See
+  [below](#automatic-updates).
 - **Pluggable remote storage.** Optional second tier behind the local disk:
   `file://` for a directory such as a network share, `s3://` for AWS S3,
   Cloudflare R2, MinIO and other S3-compatible services.
@@ -139,6 +142,8 @@ variable.
 | `--socket` | `GOCACHELRU_SOCKET` | `<dir>/gocacheprog/daemon.sock` | daemon socket |
 | `--idle-timeout` | `GOCACHELRU_IDLE_TIMEOUT` | `0` (never) | daemon exits after this long without go commands |
 | `--shutdown-timeout` | `GOCACHELRU_SHUTDOWN_TIMEOUT` | `1m` | how long shutdown waits for running go commands; after an upgrade, also how long the old daemon waits for a moment without them |
+| `--auto-update` | `GOCACHELRU_AUTO_UPDATE` | `false` | the daemon installs new releases, see [automatic updates](#automatic-updates) |
+| `--update-interval` | `GOCACHELRU_UPDATE_INTERVAL` | `6h` | how often the daemon looks for a new release; at least `1h` |
 
 Sizes accept `K`, `M`, `G`, `T` and `KiB`…`TiB` (binary) or `KB`…`TB`
 (decimal). The size counts file system blocks (4 KiB), so it is close to
@@ -281,6 +286,105 @@ Windows does not let a running `.exe` be replaced, but lets it be renamed.
 Rename `go-cache-lru.exe` to, for example, `go-cache-lru.exe.old`, put the
 new binary in its place, and delete the old file once the old daemon has
 exited.
+
+### Automatic updates
+
+Off by default. With `--auto-update` (or `GOCACHELRU_AUTO_UPDATE=true`) the
+daemon looks for a new stable release of go-cache-lru on GitHub right after
+it starts and then every `--update-interval`, and installs it in place of
+its own binary. Only the daemon does this, in the background: go commands
+never wait for GitHub, and a failed check changes nothing but the log.
+Control commands and the go-cache-lru processes that go commands start as
+GOCACHEPROG never check for updates.
+
+```sh
+go env -w GOCACHEPROG="$HOME/go/bin/go-cache-lru --dir=$HOME/.cache/go-lru --max-size=30GiB --target-size=25GiB --auto-update"
+go-cache-lru stop    # a running daemon keeps its settings; the next go command starts one with the new ones
+```
+
+A check goes like this:
+
+1. The daemon asks `api.github.com` for the latest release of
+   `juev/go-cache-lru`. Drafts and pre-releases are skipped, and only a
+   version newer than the running one is installed: never a downgrade.
+2. It downloads `checksums.txt` and the archive for its system,
+   `go-cache-lru_<version>_<os>_<arch>.tar.gz`, from the release, over HTTPS
+   only, following redirects only to GitHub hosts, with size limits. The
+   archive's SHA-256 must match its line in `checksums.txt`; a missing,
+   duplicated or malformed line rejects the release. The archive must hold
+   the binary as a single regular file and no unsafe paths.
+3. It writes the binary to a private temporary file next to the installed
+   one, checks that it is an executable for this system and architecture,
+   runs it with `version` and checks that it reports the release's version.
+   Then it renames the file over the installed binary, keeping its
+   permission bits. The running file is never rewritten. If the binary is
+   reached through a symlink, the file the link points to is replaced and
+   the link stays.
+
+The new binary takes over as after a manual upgrade, described above: the
+running daemon notices it when the next go command connects, exits once no
+go command is connected, and the go command after that starts the new
+version.
+
+Daemons that share one binary, with the same or different `--dir`, take
+turns: installation holds a lock on the binary's directory. A daemon
+records which file its binary is when it starts, checks that it is still
+that file before the download, after taking the lock and right before the
+rename, and gives up if it is not. Another daemon's installation is
+therefore left alone, and so is a manual upgrade that happened before the
+last check. A manual installer does not take the lock, though: an upgrade
+that lands between that check and the rename is replaced. The check is
+not an atomic compare-and-swap.
+
+The time of the last check is kept in `<dir>/gocacheprog/update-check`; a
+restarted daemon waits for the rest of the interval instead of checking
+again.
+
+The log, `<dir>/gocacheprog/daemon.log`, shows every step in lines starting
+with `auto-update:`: the schedule at start, "up to date", the download, the
+installation, or why a check failed.
+
+Which binaries update themselves: release binaries from the
+[releases page](https://github.com/juev/go-cache-lru/releases) and
+`go install github.com/juev/go-cache-lru/cmd/go-cache-lru@vX.Y.Z` (or
+`@latest`) builds; the latter are replaced by the release binary of the
+next version. Development builds, builds with local changes,
+pseudo-versions (`@main`, `@<commit>`), pre-releases and builds of forks are
+left alone, and the log says `auto-update is off:` with the reason.
+
+Installation ownership. The daemon replaces the binary only in a directory
+it can write to and only if the binary belongs to the user it runs as; it
+never asks for more privileges. A read-only or root-owned installation such
+as `/usr/local/bin` is logged as `cannot replace` and keeps working.
+Binaries managed by a package manager (Homebrew, apt, Nix and the like) are
+not suitable for self-updates even when their files are writable, because
+the package manager would not know about the change: keep `--auto-update`
+off there and update through the package manager.
+
+Platforms. Automatic replacement works on Linux and macOS, amd64 and arm64.
+On Windows `--auto-update` only logs
+`auto-update is off: automatic replacement is not supported on windows`, and
+the daemon works as without it: a running `.exe` cannot be renamed over, and
+this version does not rename it away. Update by hand as described above.
+
+macOS. The daemon does not remove quarantine attributes, change Gatekeeper
+settings or re-sign the binary. Release binaries are not signed with a
+Developer ID or notarized. Where a security policy, for example on a managed
+Mac, refuses to run such a binary, the check run in step 3 fails, the daemon
+logs it and keeps the old binary.
+
+Trust. HTTPS protects the download in transit, and `checksums.txt` catches
+a corrupted or mismatched archive. Both come from the same GitHub release,
+so they do not authenticate the publisher: whoever can publish releases in
+the repository, through a compromised account for example, can publish a
+binary that passes every check. There is no cryptographic signature. If
+that is not acceptable, leave `--auto-update` off.
+
+Network. Checks go to `api.github.com`, then for a download to `github.com`
+and the GitHub storage hosts under `githubusercontent.com` that release
+downloads redirect to. The daemon honors `HTTPS_PROXY`. GitHub allows 60
+unauthenticated API requests per hour per address; each daemon makes one per
+interval.
 
 ### go clean -cache
 
