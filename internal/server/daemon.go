@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/juev/go-cache-lru/internal/cache"
@@ -15,6 +16,7 @@ import (
 	"github.com/juev/go-cache-lru/internal/storage"
 	_ "github.com/juev/go-cache-lru/internal/storage/filestore" // file:// driver
 	_ "github.com/juev/go-cache-lru/internal/storage/s3store"   // s3:// driver
+	"github.com/juev/go-cache-lru/internal/update"
 )
 
 // ErrAlreadyRunning means another daemon owns the cache directory.
@@ -107,12 +109,30 @@ func Run(ctx context.Context, cfg config.Config, lockWait time.Duration, logf fu
 	if err != nil {
 		logf("executable: %v; the daemon will not notice an upgrade", err)
 	}
+	var updater func(context.Context)
+	if cfg.AutoUpdate {
+		bi, _ := debug.ReadBuildInfo()
+		u, err := update.New(update.Options{
+			Executable: exe,
+			Version:    version,
+			BuildInfo:  bi,
+			Interval:   cfg.UpdateInterval,
+			StatePath:  filepath.Join(cfg.StateDir(), "update-check"),
+			Logf:       logf,
+		})
+		if err != nil {
+			logf("auto-update is off: %v", err)
+		} else {
+			updater = u.Run
+		}
+	}
 	srv := New(Options{
 		Cache:        c,
 		Remote:       backend,
 		IdleTimeout:  cfg.IdleTimeout,
 		DrainTimeout: cfg.DrainTimeout,
 		Executable:   exe,
+		Update:       updater,
 		Logf:         logf,
 	})
 	// Evict right away if the limit shrank since the last run.

@@ -45,7 +45,11 @@ type Options struct {
 	// If that moment does not come within DrainTimeout, it shuts down as
 	// on Shutdown. Empty disables the check.
 	Executable string
-	Logf       func(format string, args ...any)
+	// Update, if set, runs in the background while the server accepts
+	// connections. Serve cancels its context as soon as shutdown starts
+	// and waits for it to return.
+	Update func(ctx context.Context)
+	Logf   func(format string, args ...any)
 }
 
 // Server is the daemon.
@@ -149,6 +153,18 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		s.cache.Run(bg)
 	}()
 
+	updateCtx, cancelUpdate := context.WithCancel(ctx)
+	defer cancelUpdate()
+	updateDone := make(chan struct{})
+	if s.opts.Update != nil {
+		go func() {
+			defer close(updateDone)
+			s.opts.Update(updateCtx)
+		}()
+	} else {
+		close(updateDone)
+	}
+
 	acceptErr := make(chan error, 1)
 	go func() {
 		noticed := false
@@ -246,7 +262,11 @@ loop:
 	}
 
 	s.Shutdown()
+	cancelUpdate()
 	_ = ln.Close()
+	// No installation may start or still run once the daemon is going
+	// away.
+	<-updateDone
 	s.drain()
 	if s.remote != nil {
 		s.remote.close(s.opts.DrainTimeout)

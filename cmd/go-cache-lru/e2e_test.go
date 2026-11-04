@@ -55,6 +55,8 @@ func newEnv(t *testing.T, extra ...string) *env {
 		"GOCACHELRU_DIR=",
 		"GOCACHELRU_SOCKET=",
 		"GOCACHELRU_REMOTE=",
+		"GOCACHELRU_AUTO_UPDATE=",
+		"GOCACHELRU_UPDATE_INTERVAL=",
 		"GOFLAGS=-trimpath",
 		"GOTOOLCHAIN=local",
 	)
